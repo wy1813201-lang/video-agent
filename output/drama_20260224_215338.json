@@ -1,0 +1,52 @@
+{
+  "config": {
+    "topic": "重生千金复仇记",
+    "style": "情感",
+    "episodes": 3,
+    "duration_per_episode": 60,
+    "language": "zh",
+    "output_dir": "output",
+    "resolution": "1080x1920",
+    "openai_api_key": null,
+    "anthropic_api_key": null,
+    "replicate_api_key": null
+  },
+  "episodes": [
+    {
+      "episode_num": 1,
+      "title": "第1集",
+      "script": "第1集: 重生归来\n\n场景1: [清晨·卧室]\n旁白: 当她再次睁开眼，时间回到了十年前...\n女主: 这是...十年前？我重生了？\n\n场景2: [客厅]\n妈妈: 起来了？快来吃早餐。\n女主: (震惊)妈...妈妈...(上一世，妈妈已经...)\n妈妈: 怎么了？傻孩子。\n\n场景3: [学校]\n同学: 听说今天有新同学转来...\n男主: (出场)大家好，我是...\n女主: (内心)是他！就是这个人，上一世害我家破人亡！\n\n场景4: [结尾]\n女主: (内心)既然重生了，这一世我一定要保护好家人，让他付出代价！\n字幕: 敬请期待下一集",
+      "image_prompts": [
+        "[清晨·卧室], beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[客厅], beautiful female character, middle-aged character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[学校], handsome male character, beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[结尾], handsome male character, beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece"
+      ],
+      "video_path": null
+    },
+    {
+      "episode_num": 2,
+      "title": "第2集",
+      "script": "第2集: 重生归来\n\n场景1: [清晨·卧室]\n旁白: 当她再次睁开眼，时间回到了十年前...\n女主: 这是...十年前？我重生了？\n\n场景2: [客厅]\n妈妈: 起来了？快来吃早餐。\n女主: (震惊)妈...妈妈...(上一世，妈妈已经...)\n妈妈: 怎么了？傻孩子。\n\n场景3: [学校]\n同学: 听说今天有新同学转来...\n男主: (出场)大家好，我是...\n女主: (内心)是他！就是这个人，上一世害我家破人亡！\n\n场景4: [结尾]\n女主: (内心)既然重生了，这一世我一定要保护好家人，让他付出代价！\n字幕: 敬请期待下一集",
+      "image_prompts": [
+        "[清晨·卧室], beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[客厅], beautiful female character, middle-aged character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[学校], handsome male character, beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[结尾], handsome male character, beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece"
+      ],
+      "video_path": null
+    },
+    {
+      "episode_num": 3,
+      "title": "第3集",
+      "script": "第3集: 重生归来\n\n场景1: [清晨·卧室]\n旁白: 当她再次睁开眼，时间回到了十年前...\n女主: 这是...十年前？我重生了？\n\n场景2: [客厅]\n妈妈: 起来了？快来吃早餐。\n女主: (震惊)妈...妈妈...(上一世，妈妈已经...)\n妈妈: 怎么了？傻孩子。\n\n场景3: [学校]\n同学: 听说今天有新同学转来...\n男主: (出场)大家好，我是...\n女主: (内心)是他！就是这个人，上一世害我家破人亡！\n\n场景4: [结尾]\n女主: (内心)既然重生了，这一世我一定要保护好家人，让他付出代价！\n字幕: 敬请期待下一集",
+      "image_prompts": [
+        "[清晨·卧室], beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[客厅], beautiful female character, middle-aged character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[学校], handsome male character, beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece",
+        "[结尾], handsome male character, beautiful female character, cinematic, romantic, soft lighting, emotional, expressive, detailed face, professional photography, high quality, 8k, detailed, masterpiece"
+      ],
+      "video_path": null
+    }
+  ]
+}
