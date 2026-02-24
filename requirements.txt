@@ -1,0 +1,25 @@
+# AI Short Drama Automator
+# AI短剧自动生成工具
+
+# 核心依赖
+openai>=1.0.0
+anthropic>=0.18.0
+
+# 浏览器自动化
+playwright>=1.40.0
+selenium>=4.15.0
+
+# 视频处理
+ffmpeg>=5.0  # 系统依赖
+
+# 异步
+aiohttp>=3.9.0
+asyncio
+
+# 配置
+python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# 工具
+pillow>=10.0.0
+requests>=2.31.0
