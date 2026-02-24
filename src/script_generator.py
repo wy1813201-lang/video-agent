@@ -1,9 +1,12 @@
 """
 剧本生成器
 使用 LLM 生成短剧剧本
+支持自定义 API 端点
 """
 
 import os
+import json
+import requests
 from typing import Optional
 
 # 可以集成的 LLM 客户端
@@ -42,17 +45,29 @@ class ScriptGenerator:
 
 请用中文输出。"""
     
-    def __init__(self, config):
+    def __init__(self, config, api_config=None):
         self.config = config
+        self.api_config = api_config or {}
         
         # 初始化 LLM 客户端
         self.client = None
+        self.client_type = None
         
-        if config.openai_api_key and OPENAI_AVAILABLE:
+        # 优先使用自定义 Opus 端点
+        custom_opus = self.api_config.get("script", {}).get("custom_opus", {})
+        if custom_opus.get("enabled") and custom_opus.get("api_key"):
+            self.custom_opus = {
+                "api_key": custom_opus["api_key"],
+                "base_url": custom_opus.get("base_url", "http://47.253.7.24:3000"),
+                "model": custom_opus.get("model", "claude-opus-4-6")
+            }
+            self.client_type = "custom_opus"
+        elif config.openai_api_key and OPENAI_AVAILABLE:
             openai.api_key = config.openai_api_key
-            self.client = "openai"
+            self.client_type = "openai"
         elif config.anthropic_api_key and ANTHROPIC_AVAILABLE:
-            self.client = anthropic.Anthropic(config.anthropic_api_key)
+            self.client = anthropic.Anthropic(api_key=config.anthropic_api_key)
+            self.client_type = "anthropic"
     
     async def generate_episode(
         self, 
@@ -68,14 +83,40 @@ class ScriptGenerator:
 总集数: {total_episodes}
 每集时长: {self.config.duration_per_episode}秒
 
-请生成完整的剧本，包含场景描述和对话。"""
+请生成完整的剧本，包含场景描述和对话。每集内容要有变化，不要重复。"""
         
-        if self.client == "openai":
+        if self.client_type == "custom_opus":
+            return await self._generate_custom_opus(user_prompt)
+        elif self.client_type == "openai":
             return await self._generate_openai(user_prompt)
-        elif self.client == "anthropic":
+        elif self.client_type == "anthropic":
             return await self._generate_anthropic(user_prompt)
         else:
             return self._generate_fallback(topic, episode_num)
+    
+    async def _generate_custom_opus(self, prompt: str) -> str:
+        """使用自定义 Opus 端点生成"""
+        try:
+            url = f"{self.custom_opus['base_url']}/v1/messages"
+            headers = {
+                "Authorization": f"Bearer {self.custom_opus['api_key']}",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01"
+            }
+            data = {
+                "model": self.custom_opus["model"],
+                "max_tokens": 4000,
+                "system": self.SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+            
+            response = requests.post(url, headers=headers, json=data, timeout=120)
+            response.raise_for_status()
+            
+            result = response.json()
+            return result["content"][0]["text"]
+        except Exception as e:
+            return f"自定义 Opus API 错误: {e}"
     
     async def _generate_openai(self, prompt: str) -> str:
         """使用 OpenAI 生成"""
@@ -94,13 +135,14 @@ class ScriptGenerator:
             return f"OpenAI API 错误: {e}"
     
     async def _generate_anthropic(self, prompt: str) -> str:
-        """使用 Anthropic 生成"""
+        """使用 Anthropic Claude Opus 生成"""
         try:
             response = self.client.messages.create(
-                model="claude-3-opus-20240229",
+                model="claude-opus-4-6-20251114",
                 system=self.SYSTEM_PROMPT,
-                max_tokens=2000,
-                messages=[{"role": "user", "content": prompt}]
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.8
             )
             return response.content[0].text
         except Exception as e:

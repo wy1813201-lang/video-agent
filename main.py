@@ -72,8 +72,15 @@ class ShortDramaAutomator:
         self.prompt_builder = None
         self.video_assembler = None
         
+        # 加载 API 配置
+        api_config = {}
+        config_path = os.path.join(os.path.dirname(__file__), "config", "api_keys.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                api_config = json.load(f)
+        
         if ScriptGenerator:
-            self.script_gen = ScriptGenerator(config)
+            self.script_gen = ScriptGenerator(config, api_config)
         if PromptBuilder:
             self.prompt_builder = PromptBuilder(config)
         if VideoAssembler:
@@ -161,11 +168,24 @@ class ShortDramaAutomator:
 
 async def main():
     """测试运行"""
+    # 加载 API 配置
+    api_config = {}
+    config_path = os.path.join(os.path.dirname(__file__), "config", "api_keys.json")
+    anthropic_api_key = None
+    
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            api_config = json.load(f)
+            custom_opus = api_config.get("script", {}).get("custom_opus", {})
+            if custom_opus.get("enabled"):
+                anthropic_api_key = custom_opus.get("api_key")
+    
     config = DramaConfig(
         topic="重生千金复仇记",
         style="情感",
         episodes=3,
-        output_dir="output"
+        output_dir="output",
+        anthropic_api_key=anthropic_api_key
     )
     
     automator = ShortDramaAutomator(config)
