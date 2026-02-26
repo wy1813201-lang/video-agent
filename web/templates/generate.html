@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}生成任务 - AI短剧自动化{% endblock %}
+{% block content %}
+<h1>新建生成任务</h1>
+
+{% if success %}
+<div class="alert alert-success">✅ {{ success }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">❌ {{ error }}</div>
+{% endif %}
+
+<div class="card" style="max-width:560px">
+  <form method="POST">
+    <div class="form-group">
+      <label>短剧主题 *</label>
+      <input type="text" name="topic" placeholder="例如：重生千金复仇记" required>
+    </div>
+
+    <div class="form-group">
+      <label>风格</label>
+      <select name="style">
+        {% for s in styles %}
+        <option value="{{ s }}">{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>集数</label>
+      <input type="number" name="episodes" value="3" min="1" max="20">
+    </div>
+
+    <button type="submit" class="btn btn-primary">🚀 开始生成</button>
+  </form>
+</div>
+
+<div style="margin-top:32px">
+  <h2>风格说明</h2>
+  <div class="card-grid">
+    <div class="card"><strong>古装</strong><p style="color:#888;font-size:13px;margin-top:6px">宫廷/江湖/历史，暖金色调</p></div>
+    <div class="card"><strong>现代</strong><p style="color:#888;font-size:13px;margin-top:6px">都市/职场/生活，清新自然</p></div>
+    <div class="card"><strong>科幻</strong><p style="color:#888;font-size:13px;margin-top:6px">未来/赛博朋克，霓虹冷调</p></div>
+    <div class="card"><strong>甜宠</strong><p style="color:#888;font-size:13px;margin-top:6px">浪漫爱情，粉嫩梦幻</p></div>
+    <div class="card"><strong>虐恋</strong><p style="color:#888;font-size:13px;margin-top:6px">虐心情感，冷灰色调</p></div>
+    <div class="card"><strong>悬疑</strong><p style="color:#888;font-size:13px;margin-top:6px">悬疑惊悚，暗调高对比</p></div>
+    <div class="card"><strong>搞笑</strong><p style="color:#888;font-size:13px;margin-top:6px">喜剧轻松，明亮鲜艳</p></div>
+  </div>
+</div>
+{% endblock %}

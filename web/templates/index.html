@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}项目列表 - AI短剧自动化{% endblock %}
+{% block content %}
+<h1>项目列表</h1>
+
+{% if projects %}
+<table>
+  <thead>
+    <tr>
+      <th>主题</th>
+      <th>风格</th>
+      <th>集数</th>
+      <th>创建时间</th>
+      <th>操作</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in projects %}
+    <tr>
+      <td><strong style="color:#fff">{{ p.topic }}</strong></td>
+      <td><span class="badge badge-purple">{{ p.style }}</span></td>
+      <td>{{ p.episodes }} 集</td>
+      <td style="color:#888">{{ p.created_str }}</td>
+      <td><a href="/project/{{ p.filename }}" class="btn btn-outline" style="padding:4px 12px;font-size:12px">查看</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  <div class="icon">🎬</div>
+  <p>还没有项目，<a href="/generate">去生成一个</a></p>
+</div>
+{% endif %}
+
+<div style="margin-top:24px">
+  <a href="/generate" class="btn btn-primary">+ 新建生成任务</a>
+</div>
+{% endblock %}

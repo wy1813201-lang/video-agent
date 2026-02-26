@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}素材库 - AI短剧自动化{% endblock %}
+{% block content %}
+<h1>素材库</h1>
+
+<div style="display:flex;gap:12px;margin-bottom:24px;flex-wrap:wrap;align-items:center">
+  <form method="GET" style="display:flex;gap:8px;flex:1;min-width:240px">
+    <input type="text" name="q" value="{{ keyword }}" placeholder="搜索素材名称/标签..." style="flex:1">
+    <input type="hidden" name="category" value="{{ current_category }}">
+    <button type="submit" class="btn btn-primary" style="white-space:nowrap">搜索</button>
+  </form>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a href="/assets" class="btn {% if not current_category %}btn-primary{% else %}btn-outline{% endif %}">全部</a>
+    {% for cat in categories %}
+    <a href="/assets?category={{ cat }}{% if keyword %}&q={{ keyword }}{% endif %}"
+       class="btn {% if current_category == cat %}btn-primary{% else %}btn-outline{% endif %}">
+      {% if cat == 'character' %}角色
+      {% elif cat == 'scene' %}场景
+      {% elif cat == 'prop' %}道具
+      {% elif cat == 'music' %}音乐
+      {% elif cat == 'effect' %}特效
+      {% else %}其他{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+</div>
+
+{% if assets %}
+<div class="card-grid">
+  {% for a in assets %}
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <strong style="color:#fff;font-size:14px">{{ a.name }}</strong>
+      <span class="badge
+        {% if a.asset_type == 'image' %}badge-blue
+        {% elif a.asset_type == 'video' %}badge-purple
+        {% else %}badge-green{% endif %}">
+        {{ a.asset_type }}
+      </span>
+    </div>
+
+    <div class="meta" style="margin-top:10px">
+      {% if a.category %}
+      <span>📁
+        {% if a.category == 'character' %}角色
+        {% elif a.category == 'scene' %}场景
+        {% elif a.category == 'prop' %}道具
+        {% elif a.category == 'music' %}音乐
+        {% elif a.category == 'effect' %}特效
+        {% else %}其他{% endif %}
+      </span>
+      {% endif %}
+      {% if a.style %}<span>🎨 {{ a.style }}</span>{% endif %}
+      {% if a.use_count %}<span>♻️ 复用 {{ a.use_count }} 次</span>{% endif %}
+      {% if a.file_size %}<span>{{ "%.1f"|format(a.file_size / 1024) }} KB</span>{% endif %}
+    </div>
+
+    {% if a.tags %}
+    <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+      {% for tag in a.tags %}
+      <span class="badge badge-gray">{{ tag }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if a.description %}
+    <p style="color:#888;font-size:12px;margin-top:8px">{{ a.description }}</p>
+    {% endif %}
+
+    <div style="margin-top:12px;font-size:11px;color:#555">
+      {{ a.source }} · {{ a.created_at[:10] if a.created_at else '' }}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <div class="icon">📦</div>
+  <p>
+    {% if keyword or current_category %}
+      没有找到匹配的素材
+    {% else %}
+      素材库为空，生成项目后素材会自动入库
+    {% endif %}
+  </p>
+</div>
+{% endif %}
+{% endblock %}

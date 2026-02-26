@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ data.config.topic }} - AI短剧自动化{% endblock %}
+{% block content %}
+<div style="margin-bottom:16px">
+  <a href="/" style="color:#888;font-size:13px">← 返回列表</a>
+</div>
+
+<h1>{{ data.config.topic }}</h1>
+<div class="meta" style="margin-bottom:24px">
+  <span class="badge badge-purple">{{ data.config.style }}</span>
+  <span style="color:#888">{{ data.config.episodes }} 集</span>
+  <span style="color:#888">{{ data.config.resolution }}</span>
+</div>
+
+{% for ep in data.episodes %}
+<div class="card" style="margin-bottom:20px">
+  <h2>第 {{ ep.episode_num }} 集</h2>
+
+  {% if ep.script %}
+  <div style="margin-top:12px">
+    <div style="font-size:12px;color:#888;margin-bottom:6px">剧本</div>
+    <pre style="background:#12121a;border-radius:8px;padding:14px;font-size:13px;
+                color:#ccc;white-space:pre-wrap;overflow-x:auto;line-height:1.6">{{ ep.script[:800] }}{% if ep.script|length > 800 %}...{% endif %}</pre>
+  </div>
+  {% endif %}
+
+  {% if ep.image_prompts %}
+  <div style="margin-top:16px">
+    <div style="font-size:12px;color:#888;margin-bottom:8px">图像提示词 ({{ ep.image_prompts|length }} 个)</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      {% for prompt in ep.image_prompts[:5] %}
+      <div style="background:#12121a;border-radius:6px;padding:10px 12px;
+                  font-size:12px;color:#aaa;line-height:1.5">{{ prompt }}</div>
+      {% endfor %}
+      {% if ep.image_prompts|length > 5 %}
+      <div style="color:#666;font-size:12px">... 还有 {{ ep.image_prompts|length - 5 }} 个</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}
