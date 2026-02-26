@@ -1,0 +1,40 @@
+app:
+  name: "AI Short Drama Automator"
+  version: "2.0.0"
+  debug: true
+
+output:
+  dir: "output"
+  resolution: "1080x1920"   # 竖屏 9:16
+  fps: 30
+  video_bitrate: "4M"
+  audio_bitrate: "192k"
+
+storage:
+  dir: "data/storage"
+  storyboards_dir: "output/storyboards"
+
+drama:
+  default_style: "情感"       # 情感 / 悬疑 / 搞笑 / 科幻
+  default_episodes: 3
+  duration_per_episode: 60   # 秒
+  language: "zh"
+
+storyboard:
+  auto_approve: false         # true = 生成后自动审批所有场景
+  default_scene_duration: 3.0 # 每个场景默认时长(秒)
+
+video:
+  transition: "fade"          # none / fade / dissolve / slideleft / slideright / wipe
+  transition_duration: 0.5
+  bgm_volume: 0.3
+  voiceover_volume: 1.0
+
+ai:
+  text_provider: "openai"     # openai / anthropic / custom
+  image_provider: "openai"
+  video_provider: "doubao"
+
+tts:
+  provider: "edge_tts"        # edge_tts / openai
+  voice: "zh-CN-XiaoxiaoNeural"
