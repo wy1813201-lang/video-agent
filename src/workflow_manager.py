@@ -82,6 +82,13 @@ class WorkflowManager:
         # quality_callback(item_type, item_data) -> QualityResult
         self.quality_callback = quality_callback or self._default_quality_check
         self.paused = False
+        self._approval_event = asyncio.Event()
+        self.api_config = self._load_config()
+
+    def _load_config(self) -> dict:
+        """读取并返回 API 配置，供各方法复用"""
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
 
     # ------------------------------------------------------------------ #
     #  进度 & 审批
@@ -123,13 +130,11 @@ class WorkflowManager:
 
     async def wait_for_approval(self, timeout: int = 300):
         """等待用户审批，超时后自动继续"""
-        start = datetime.now()
-        while not self.state.approved and self.state.needs_approval:
-            if (datetime.now() - start).seconds > timeout:
-                self.notify("⏰ 审批超时，自动继续执行")
-                self.state.approved = True
-                self.state.needs_approval = False
-            await asyncio.sleep(2)
+        self._approval_event.clear()
+        try:
+            await asyncio.wait_for(self._approval_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self.notify("⏰ 审批超时，自动继续执行")
 
         self.state.approved = False
         self.state.needs_approval = False
@@ -137,6 +142,7 @@ class WorkflowManager:
     def approve(self):
         self.state.approved = True
         self.state.needs_approval = False
+        self._approval_event.set()
         self.notify("✅ 用户已批准，继续执行")
 
     def reject(self, feedback: str = ""):
@@ -347,10 +353,7 @@ class WorkflowManager:
         """生成剧本 - 调用 ScriptGenerator"""
         from script_generator import ScriptGenerator
 
-        with open(CONFIG_PATH) as f:
-            api_config = json.load(f)
-
-        script_gen = ScriptGenerator(config, api_config)
+        script_gen = ScriptGenerator(config, self.api_config)
         topic = getattr(config, "topic", "短剧")
         episodes = getattr(config, "episodes", 3)
 
@@ -363,13 +366,10 @@ class WorkflowManager:
 
     async def generate_prompts(self, script):
         """从剧本提取图像提示词"""
-        with open(CONFIG_PATH) as f:
-            api_config = json.load(f)
-
-        quality_suffix = api_config.get("prompt", {}).get(
+        quality_suffix = self.api_config.get("prompt", {}).get(
             "image_quality_suffix", "high quality, 8k, detailed, masterpiece"
         )
-        aspect_ratio = api_config.get("prompt", {}).get("default_aspect_ratio", "9:16")
+        aspect_ratio = self.api_config.get("prompt", {}).get("default_aspect_ratio", "9:16")
 
         prompts = []
         for block in script.split("场景"):
@@ -388,10 +388,7 @@ class WorkflowManager:
 
     async def generate_image(self, prompt):
         """生成图像 - 调用 cozex 图像 API"""
-        with open(CONFIG_PATH) as f:
-            api_config = json.load(f)
-
-        img_cfg = api_config.get("image", {}).get("cozex", {})
+        img_cfg = self.api_config.get("image", {}).get("cozex", {})
         if not img_cfg.get("enabled"):
             # fallback: 返回空路径，不阻断流程
             self.notify("⚠️ 图像 API 未启用，跳过图像生成")
@@ -450,10 +447,7 @@ class WorkflowManager:
         """生成视频 - 调用 JimengVideoClient"""
         from jimeng_client import JimengVideoClient
 
-        with open(CONFIG_PATH) as f:
-            api_config = json.load(f)
-
-        video_cfg = api_config.get("video", {}).get("jimeng", {})
+        video_cfg = self.api_config.get("video", {}).get("jimeng", {})
         if not video_cfg.get("enabled"):
             self.notify("⚠️ 即梦视频 API 未启用，跳过视频生成")
             return ""
@@ -461,7 +455,7 @@ class WorkflowManager:
         client = JimengVideoClient()
 
         # 用图像路径对应的提示词（或用通用提示词）
-        prompt_suffix = api_config.get("prompt", {}).get(
+        prompt_suffix = self.api_config.get("prompt", {}).get(
             "video_quality_suffix", "smooth motion, cinematic, high quality video"
         )
         prompt = f"cinematic short drama scene, {prompt_suffix}"
@@ -489,11 +483,8 @@ class WorkflowManager:
             self.notify("⚠️ 无有效视频片段，跳过合成")
             return ""
 
-        with open(CONFIG_PATH) as f:
-            api_config = json.load(f)
-
         output_dir = Path(
-            api_config.get("video", {}).get("jimeng", {}).get(
+            self.api_config.get("video", {}).get("jimeng", {}).get(
                 "output_dir", "~/Desktop/ShortDrama"
             )
         ).expanduser()

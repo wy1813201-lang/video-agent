@@ -3,7 +3,9 @@
 火山引擎视觉智能 API - 使用官方 SDK
 """
 
+import asyncio
 import json
+import aiohttp
 import requests
 from pathlib import Path
 from datetime import datetime
@@ -47,7 +49,22 @@ class JimengVideoClient:
         )
         SignerV4.sign(request, credentials)
 
-    def video_generation(
+    def _build_request(self, action: str, body: dict) -> Request:
+        """构建并签名请求，避免重复代码"""
+        request = Request()
+        request.host = self.host
+        request.method = 'POST'
+        request.path = '/'
+        request.query = {'Action': action, 'Version': '2022-08-31'}
+        request.body = json.dumps(body).encode('utf-8')
+        request.headers = {
+            'Content-Type': 'application/json',
+            'Host': self.host
+        }
+        self._sign_request(request)
+        return request
+
+    async def video_generation(
         self,
         prompt: str,
         resolution: str = "720p",
@@ -56,96 +73,68 @@ class JimengVideoClient:
         seed: int = -1,
         max_wait: int = 300
     ) -> dict:
-        """生成视频"""
+        """生成视频（异步）"""
         resolution = resolution.lower().replace("p", "p")
         model_config = self.models.get(resolution, {})
         req_key = model_config.get("req_key", "jimeng_t2v_v30")
-        
+
         print(f"[Jimeng] 生成: {prompt[:30]}... | {resolution}")
-        
-        # 构建请求
-        request = Request()
-        request.host = self.host
-        request.method = 'POST'
-        request.path = '/'
-        request.query = {'Action': 'CVSync2AsyncSubmitTask', 'Version': '2022-08-31'}
-        request.body = json.dumps({
-            "req_key": req_key,
-            "prompt": prompt,
-            "seed": seed,
-            "frames": frames,
-            "aspect_ratio": aspect_ratio
-        }).encode('utf-8')
-        request.headers = {
-            'Content-Type': 'application/json',
-            'Host': self.host
-        }
-        
-        # 签名
-        self._sign_request(request)
-        
-        # 发送请求
-        url = f"https://{self.host}/?Action=CVSync2AsyncSubmitTask&Version=2022-08-31"
-        resp = requests.post(url, headers=request.headers, data=request.body)
-        
-        result = resp.json()
-        
-        if result.get("code") != 10000:
-            raise Exception(f"提交失败: {result.get('message')}")
-        
-        task_id = result.get("data", {}).get("task_id")
-        print(f"[Jimeng] 任务ID: {task_id}")
-        
-        # 轮询等待结果
-        import time
-        for i in range(max_wait // 3):
-            time.sleep(3)
-            
-            # 查询任务
-            request = Request()
-            request.host = self.host
-            request.method = 'POST'
-            request.path = '/'
-            request.query = {'Action': 'CVSync2AsyncGetResult', 'Version': '2022-08-31'}
-            request.body = json.dumps({
+
+        async with aiohttp.ClientSession() as session:
+            # 提交任务
+            req = self._build_request('CVSync2AsyncSubmitTask', {
                 "req_key": req_key,
-                "task_id": task_id
-            }).encode('utf-8')
-            request.headers = {
-                'Content-Type': 'application/json',
-                'Host': self.host
-            }
-            
-            self._sign_request(request)
-            
-            url = f"https://{self.host}/?Action=CVSync2AsyncGetResult&Version=2022-08-31"
-            resp = requests.post(url, headers=request.headers, data=request.body)
-            
-            result = resp.json()
-            status = result.get("data", {}).get("status")
-            
-            print(f"[Jimeng] 状态: {status}")
-            
-            if status == 'done':
-                video_url = result.get("data", {}).get("video_url")
-                break
-            elif status in ['not_found', 'expired']:
-                raise Exception("任务失败或过期")
-        else:
-            raise Exception("等待超时")
-        
-        # 下载视频
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_path = self.videos_dir / f"video_{timestamp}.mp4"
-        
-        resp = requests.get(video_url)
-        resp.raise_for_status()
-        
+                "prompt": prompt,
+                "seed": seed,
+                "frames": frames,
+                "aspect_ratio": aspect_ratio
+            })
+            url = f"https://{self.host}/?Action=CVSync2AsyncSubmitTask&Version=2022-08-31"
+            async with session.post(url, headers=req.headers, data=req.body) as resp:
+                result = await resp.json()
+
+            if result.get("code") != 10000:
+                raise Exception(f"提交失败: {result.get('message')}")
+
+            task_id = result.get("data", {}).get("task_id")
+            print(f"[Jimeng] 任务ID: {task_id}")
+
+            # 轮询等待结果
+            poll_body = {"req_key": req_key, "task_id": task_id}
+            poll_url = f"https://{self.host}/?Action=CVSync2AsyncGetResult&Version=2022-08-31"
+            video_url = None
+
+            for _ in range(max_wait // 3):
+                await asyncio.sleep(3)
+
+                req = self._build_request('CVSync2AsyncGetResult', poll_body)
+                async with session.post(poll_url, headers=req.headers, data=req.body) as resp:
+                    result = await resp.json()
+
+                status = result.get("data", {}).get("status")
+                print(f"[Jimeng] 状态: {status}")
+
+                if status == 'done':
+                    video_url = result.get("data", {}).get("video_url")
+                    break
+                elif status in ['not_found', 'expired']:
+                    raise Exception("任务失败或过期")
+            else:
+                raise Exception("等待超时")
+
+            # 下载视频
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            video_path = self.videos_dir / f"video_{timestamp}.mp4"
+
+            async with session.get(video_url) as resp:
+                resp.raise_for_status()
+                content = await resp.read()
+
         with open(video_path, "wb") as f:
-            f.write(resp.content)
-        
+            f.write(content)
+
         print(f"[Jimeng] 保存: {video_path}")
-        
+
         return {
             "video_path": str(video_path),
             "video_url": video_url,

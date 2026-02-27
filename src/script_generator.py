@@ -85,68 +85,62 @@ class ScriptGenerator:
 
 请生成完整的剧本，包含场景描述和对话。每集内容要有变化，不要重复。"""
         
-        if self.client_type == "custom_opus":
-            return await self._generate_custom_opus(user_prompt)
-        elif self.client_type == "openai":
-            return await self._generate_openai(user_prompt)
-        elif self.client_type == "anthropic":
-            return await self._generate_anthropic(user_prompt)
-        else:
-            return self._generate_fallback(topic, episode_num)
+        try:
+            if self.client_type == "custom_opus":
+                return await self._generate_custom_opus(user_prompt)
+            elif self.client_type == "openai":
+                return await self._generate_openai(user_prompt)
+            elif self.client_type == "anthropic":
+                return await self._generate_anthropic(user_prompt)
+            else:
+                return self._generate_fallback(topic, episode_num)
+        except Exception as e:
+            raise RuntimeError(f"第{episode_num}集剧本生成失败: {e}") from e
     
     async def _generate_custom_opus(self, prompt: str) -> str:
         """使用自定义 Opus 端点生成"""
-        try:
-            url = f"{self.custom_opus['base_url']}/v1/messages"
-            headers = {
-                "Authorization": f"Bearer {self.custom_opus['api_key']}",
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            }
-            data = {
-                "model": self.custom_opus["model"],
-                "max_tokens": 4000,
-                "system": self.SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": prompt}]
-            }
-            
-            response = requests.post(url, headers=headers, json=data, timeout=120)
-            response.raise_for_status()
-            
-            result = response.json()
-            return result["content"][0]["text"]
-        except Exception as e:
-            return f"自定义 Opus API 错误: {e}"
+        url = f"{self.custom_opus['base_url']}/v1/messages"
+        headers = {
+            "Authorization": f"Bearer {self.custom_opus['api_key']}",
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01"
+        }
+        data = {
+            "model": self.custom_opus["model"],
+            "max_tokens": 4000,
+            "system": self.SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        
+        response = requests.post(url, headers=headers, json=data, timeout=120)
+        response.raise_for_status()
+        
+        result = response.json()
+        return result["content"][0]["text"]
     
     async def _generate_openai(self, prompt: str) -> str:
         """使用 OpenAI 生成"""
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": self.SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.8,
-                max_tokens=2000
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"OpenAI API 错误: {e}"
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,
+            max_tokens=2000
+        )
+        return response.choices[0].message.content
     
     async def _generate_anthropic(self, prompt: str) -> str:
         """使用 Anthropic Claude Opus 生成"""
-        try:
-            response = self.client.messages.create(
-                model="claude-opus-4-6-20251114",
-                system=self.SYSTEM_PROMPT,
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.8
-            )
-            return response.content[0].text
-        except Exception as e:
-            return f"Anthropic API 错误: {e}"
+        response = self.client.messages.create(
+            model="claude-opus-4-6-20251114",
+            system=self.SYSTEM_PROMPT,
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8
+        )
+        return response.content[0].text
     
     def _generate_fallback(self, topic: str, episode_num: int) -> str:
         """生成示例剧本"""

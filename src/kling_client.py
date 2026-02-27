@@ -3,6 +3,7 @@
 https://klingai.com / https://api.klingai.com
 """
 
+import asyncio
 import json
 import time
 import requests
@@ -71,7 +72,7 @@ class KlingClient:
 
         return result
 
-    def text_to_video(self, prompt: str, negative_prompt: str = "",
+    async def text_to_video(self, prompt: str, negative_prompt: str = "",
                       duration: int = 5, aspect_ratio: str = "9:16",
                       model: str = "kling-v1-5",
                       poll: bool = True, max_wait: int = 300) -> dict:
@@ -97,9 +98,9 @@ class KlingClient:
         if not task_id:
             return result
 
-        return self._poll_video(task_id, max_wait)
+        return await self._poll_video(task_id, max_wait)
 
-    def image_to_video(self, image_url: str, prompt: str = "",
+    async def image_to_video(self, image_url: str, prompt: str = "",
                        duration: int = 5, model: str = "kling-v1-5",
                        poll: bool = True, max_wait: int = 300) -> dict:
         """
@@ -123,12 +124,12 @@ class KlingClient:
         if not task_id:
             return result
 
-        return self._poll_video(task_id, max_wait)
+        return await self._poll_video(task_id, max_wait)
 
-    def _poll_video(self, task_id: str, max_wait: int = 300, interval: int = 5) -> dict:
+    async def _poll_video(self, task_id: str, max_wait: int = 300, interval: int = 5) -> dict:
         elapsed = 0
         while elapsed < max_wait:
-            time.sleep(interval)
+            await asyncio.sleep(interval)
             elapsed += interval
             r = self.session.get(f"{self.base_url}/v1/videos/tasks/{task_id}", timeout=30)
             r.raise_for_status()

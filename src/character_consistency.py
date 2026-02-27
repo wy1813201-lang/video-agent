@@ -191,10 +191,30 @@ class PromptEnhancer:
 
     def __init__(self, characters: Dict[str, CharacterTrait]):
         self.characters = characters
+        # 尝试导入 prompt_builder 的角色一致性功能
+        try:
+            from src.prompt_builder import CharacterConsistencyPrompt
+            self.consistency_prompt = CharacterConsistencyPrompt
+        except ImportError:
+            self.consistency_prompt = None
 
-    def enhance(self, base_prompt: str, scene_text: str) -> str:
+    def enhance(
+        self,
+        base_prompt: str,
+        scene_text: str,
+        use_ip_adapter: bool = True,
+        use_lora: bool = False,
+        lora_name: str = None,
+    ) -> str:
         """
         根据场景文本中出现的角色，增强基础提示词
+
+        Args:
+            base_prompt: 基础提示词
+            scene_text: 场景描述文本
+            use_ip_adapter: 是否添加 IP-Adapter 提示词
+            use_lora: 是否添加 LoRA 提示词
+            lora_name: LoRA 名称（如果使用 LoRA）
         """
         character_fragments = []
 
@@ -217,13 +237,51 @@ class PromptEnhancer:
                     character_fragments.append(fragment)
 
         if not character_fragments:
+            # 无角色，也需要基础一致性
+            if self.consistency_prompt and use_ip_adapter:
+                return self.consistency_prompt.build_consistent_prompt(
+                    base_prompt, enhance_face=True
+                )
             return base_prompt
 
         character_str = " | ".join(character_fragments)
-        return f"{base_prompt}, {character_str}, consistent character design"
+        enhanced = f"{base_prompt}, {character_str}, consistent character design"
 
-    def enhance_batch(self, prompts: List[str], scene_texts: List[str]) -> List[str]:
+        # 添加角色一致性增强
+        if self.consistency_prompt:
+            # 尝试获取第一个出现的角色名
+            char_name = None
+            for role_key, keywords in CHARACTER_KEYWORDS.items():
+                for kw in keywords:
+                    if kw in scene_text:
+                        char_name = self.characters.get(role_key, CharacterTrait(name=role_key)).name
+                        break
+                if char_name:
+                    break
+
+            enhanced = self.consistency_prompt.build_consistent_prompt(
+                enhanced,
+                character_name=char_name,
+                use_ip_adapter=use_ip_adapter,
+                use_lora=use_lora,
+                lora_name=lora_name,
+                enhance_face=True,
+            )
+
+        return enhanced
+
+    def enhance_batch(
+        self,
+        prompts: List[str],
+        scene_texts: List[str],
+        use_ip_adapter: bool = True,
+        use_lora: bool = False,
+        lora_name: str = None,
+    ) -> List[str]:
         """批量增强提示词列表"""
         if len(prompts) != len(scene_texts):
             raise ValueError("prompts 和 scene_texts 长度必须一致")
-        return [self.enhance(p, s) for p, s in zip(prompts, scene_texts)]
+        return [
+            self.enhance(p, s, use_ip_adapter, use_lora, lora_name)
+            for p, s in zip(prompts, scene_texts)
+        ]

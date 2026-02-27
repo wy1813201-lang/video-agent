@@ -105,6 +105,131 @@ class LightingStyle(str, Enum):
     CHIAROSCURO = "high contrast, chiaroscuro"
 
 
+# ============ 角色一致性提示词 ============
+
+class CharacterConsistencyPrompt:
+    """
+    角色一致性提示词生成器
+    支持 IP-Adapter、LoRA、面部特征强化等
+    """
+
+    # IP-Adapter 提示词模板
+    IP_ADAPTER_TEMPLATES = [
+        "IP-Adapter, face ID, consistent character identity across frames",
+        "IP-Adapter, reference image loaded, same face profile",
+        "face ID preserved, IP-Adapter, character consistency",
+        "reference: {character_name}, consistent identity",
+    ]
+
+    # LoRA 提示词模板
+    LORA_TEMPLATES = [
+        "LoRA: {lora_name}, trained on {character_name}",
+        "<lora:{lora_name}:0.8>, {character_name} appearance",
+        "style of {character_name}, lora trained character",
+    ]
+
+    # 面部特征强化提示词
+    FACE_DETAIL_TEMPLATES = [
+        "detailed face, intricate facial features, symmetrical face",
+        "high face quality, realistic skin texture, detailed eyes",
+        "beautiful face, precise facial proportions, photorealistic",
+        "sharp facial features, clear face, high detail",
+    ]
+
+    # 服装一致性强化
+    OUTFIT_CONSISTENCY_TEMPLATES = [
+        "same outfit as reference, consistent clothing",
+        "wearing {outfit_description}, matching previous scene",
+        "identical attire, same clothes from scene {scene_num}",
+    ]
+
+    # 负面提示词（避免不一致）
+    NEGATIVE_TEMPLATES = [
+        "different face, inconsistent features, changing appearance",
+        "bad face, distorted features, deformed",
+    ]
+
+    @classmethod
+    def generate_ip_adapter_prompt(cls, character_name: str = None) -> str:
+        """生成 IP-Adapter 提示词"""
+        template = random.choice(cls.IP_ADAPTER_TEMPLATES)
+        if character_name:
+            template = template.replace("{character_name}", character_name)
+        return template
+
+    @classmethod
+    def generate_lora_prompt(cls, lora_name: str, character_name: str = None) -> str:
+        """生成 LoRA 提示词"""
+        template = random.choice(cls.LORA_TEMPLATES)
+        template = template.replace("{lora_name}", lora_name)
+        if character_name:
+            template = template.replace("{character_name}", character_name)
+        return template
+
+    @classmethod
+    def generate_face_enhance_prompt(cls) -> str:
+        """生成面部特征强化提示词"""
+        return random.choice(cls.FACE_DETAIL_TEMPLATES)
+
+    @classmethod
+    def generate_outfit_prompt(cls, outfit_description: str, scene_num: int = None) -> str:
+        """生成服装一致性提示词"""
+        template = random.choice(cls.OUTFIT_CONSISTENCY_TEMPLATES)
+        template = template.replace("{outfit_description}", outfit_description)
+        if scene_num:
+            template = template.replace("{scene_num}", str(scene_num))
+        return template
+
+    @classmethod
+    def generate_negative_prompt(cls) -> str:
+        """生成负面提示词"""
+        return ", ".join(cls.NEGATIVE_TEMPLATES)
+
+    @classmethod
+    def build_consistent_prompt(
+        cls,
+        base_prompt: str,
+        character_name: str = None,
+        use_ip_adapter: bool = True,
+        use_lora: bool = False,
+        lora_name: str = None,
+        enhance_face: bool = True,
+    ) -> str:
+        """
+        构建完整的角色一致性提示词
+
+        Args:
+            base_prompt: 基础提示词
+            character_name: 角色名称
+            use_ip_adapter: 是否使用 IP-Adapter
+            use_lora: 是否使用 LoRA
+            lora_name: LoRA 名称
+            enhance_face: 是否强化面部特征
+
+        Returns:
+            完整的提示词
+        """
+        enhancements = []
+
+        if use_ip_adapter:
+            enhancements.append(cls.generate_ip_adapter_prompt(character_name))
+
+        if use_lora and lora_name:
+            enhancements.append(cls.generate_lora_prompt(lora_name, character_name))
+
+        if enhance_face:
+            enhancements.append(cls.generate_face_enhance_prompt())
+
+        if not enhancements:
+            return base_prompt
+
+        enhanced = base_prompt
+        if enhancements:
+            enhanced += ", " + ", ".join(enhancements)
+
+        return enhanced
+
+
 # ============ 风格模板 ============
 
 XIANXIA_ACTIONS = [
@@ -364,6 +489,44 @@ class PromptBuilderV2:
             "high contrast, color grading, masterpiece",
         ])
         return f"{base_prompt}, {camera}, {quality}"
+
+
+# ============ 兼容旧接口 ============
+
+class PromptBuilder(PromptBuilderV2):
+    """
+    兼容旧接口的 PromptBuilder 类
+    main.py 通过 from src.prompt_builder import PromptBuilder 导入
+    并调用 self.prompt_builder.generate_scene_prompts(script)
+    """
+
+    def generate_scene_prompts(self, script: str) -> List[str]:
+        """
+        从剧本文本生成每个场景的提示词列表
+
+        Args:
+            script: 剧本文本，场景以"场景"关键字分隔
+
+        Returns:
+            每个场景对应的提示词字符串列表
+        """
+        scenes = [s.strip() for s in script.split("场景") if s.strip()]
+        if not scenes:
+            # 没有"场景"标记时，整体作为一个场景处理
+            return [self.enhance_prompt(script[:200])]
+
+        prompts = []
+        for i, scene in enumerate(scenes):
+            # 取场景前100字作为描述
+            description = scene[:100].replace("\n", " ").strip()
+            video_prompt = self.generate_cinematic_prompt(
+                description=description,
+                duration=self._scene_duration if hasattr(self, "_scene_duration") else 5.0,
+                style=self.style if self.style in ("xianxia", "scifi") else "cinematic",
+            )
+            prompts.append(video_prompt.to_jimeng_prompt())
+
+        return prompts
 
 
 # ============ 快捷函数 ============

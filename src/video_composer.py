@@ -5,6 +5,7 @@
 
 import os
 import json
+import asyncio
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
