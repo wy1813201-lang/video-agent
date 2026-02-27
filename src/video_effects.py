@@ -360,7 +360,7 @@ class VideoEffects:
         position: str = "bottom-center",
         font_size: int = 32,
         font_color: str = "white",
-        font_file = ""  # 使用默认字体
+        font_file: str = "",  # 使用默认字体
         shadow: bool = True,
         bg_color: Optional[str] = None
     ) -> bool:
@@ -520,21 +520,187 @@ class VideoEffects:
         except:
             return {}
 
+    def apply_lut(
+        self,
+        input_video: str,
+        output_video: str,
+        lut_type: str = 'cinematic'
+    ) -> bool:
+        """应用 LUT 调色"""
+        lut_presets = {
+            'cinematic': 'eq=contrast=1.2:saturation=0.8:brightness=0.05',
+            'warm': 'eq=contrast=1.1:saturation=1.1:brightness=0.02:gamma=1.1',
+            'cool': 'eq=contrast=1.15:saturation=0.9:gamma=0.9',
+            'vintage': 'eq=contrast=1.1:saturation=0.7:sepia=0.3',
+            'noir': 'eq=contrast=1.5:saturation=0:brightness=-0.1'
+        }
+        
+        filters = lut_presets.get(lut_type, lut_presets['cinematic']) + ',vignette=angle=0.5'
+        
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', input_video,
+            '-vf', filters,
+            '-c:a', 'copy',
+            output_video
+        ]
+        
+        ok, msg = self._run_ffmpeg(cmd)
+        if ok:
+            print(f'✅ 应用 LUT({lut_type}): {output_video}')
+        return ok
+    
+    def add_background_music(
+        self,
+        input_video: str,
+        output_video: str,
+        audio_path: str,
+        volume: float = 0.5,
+        fade_in: float = 1.0,
+        fade_out: float = 2.0
+    ) -> bool:
+        """添加背景音乐"""
+        duration = self._get_duration(input_video)
+        
+        audio_filter = f'volume={volume}'
+        if fade_in > 0:
+            audio_filter += f',afade=t=in:st=0:d={fade_in}'
+        if fade_out > 0:
+            audio_filter += f',afade=t=out:st={duration-fade_out}:d={fade_out}'
+        
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', input_video,
+            '-i', audio_path,
+            '-filter_complex', f'[1:a]{audio_filter}[a]',
+            '-map', '0:v',
+            '-map', '[a]',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            output_video
+        ]
+        
+        ok, msg = self._run_ffmpeg(cmd)
+        if ok:
+            print(f'✅ 添加背景音乐: {output_video}')
+        return ok
 
-# 便捷函数
-def create_zoom_in_effect(input_video: str, output_video: str) -> bool:
-    """创建推进效果"""
+    def add_opening_title(
+        self,
+        output_video: str,
+        title: str,
+        subtitle: str = '',
+        duration: float = 3.0,
+        style: str = 'cinematic'
+    ) -> bool:
+        """创建开场标题卡"""
+        width, height = 704, 1250
+        
+        style_colors = {
+            'cinematic': ('black', 'gold', 'white'),
+            'elegant': ('#1a1a2e', '#c9a959', 'white'),
+            'modern': ('#0f0f23', '#00d4ff', 'white')
+        }
+        bg, accent, text = style_colors.get(style, ('black', 'gold', 'white'))
+        
+        filter_str = f'color=c={bg}:s={width}x{height}:d={duration}[bg];'
+        
+        if subtitle:
+            filter_str += (
+                f'[bg]drawtext=fontfile=/System/Library/Fonts/Helvetica-Bold.ttc:'
+                f'text={title}:fontcolor={text}:fontsize=48:x=(w-text_w)/2:y=h/2-40,'
+                f'drawtext=fontfile=/System/Library/Fonts/Helvetica.ttc:'
+                f'text={subtitle}:fontcolor={accent}:fontsize=32:x=(w-text_w)/2:y=h/2+20[out]'
+            )
+        else:
+            filter_str += (
+                f'[bg]drawtext=fontfile=/System/Library/Fonts/Helvetica-Bold.ttc:'
+                f'text={title}:fontcolor={text}:fontsize=56:x=(w-text_w)/2:y=(h-text_h)/2[out]'
+            )
+        
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi',
+            '-i', f'color=c={bg}:s={width}x{height}:d={duration}',
+            '-filter_complex', filter_str,
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-t', str(duration),
+            output_video
+        ]
+        
+        ok, msg = self._run_ffmpeg(cmd)
+        if ok:
+            print(f'✅ 创建开场标题: {output_video}')
+        return ok
+
+    def add_ending_credits(
+        self,
+        output_video: str,
+        credits,
+        duration: float = 5.0
+    ) -> bool:
+        """创建片尾Credits"""
+        width, height = 704, 1250
+        
+        lines = len(credits)
+        line_height = 50
+        start_y = height - (lines * line_height) // 2
+        
+        filter_parts = [f'color=c=black:s={width}x{height}:d={duration}[bg]']
+        
+        for i, credit in enumerate(credits):
+            y_pos = start_y + i * line_height
+            filter_parts.append(
+                f'[bg]drawtext=fontfile=/System/Library/Fonts/Helvetica.ttc:'
+                f'text={credit}:fontcolor=white:fontsize=28:x=(w-text_w)/2:y={y_pos}[bg]'
+            )
+        
+        filter_str = ','.join(filter_parts[:-1]) + '[out]' if len(filter_parts) > 1 else filter_parts[0]
+        
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi',
+            '-i', f'color=black:s={width}x{height}:d={duration}',
+            '-filter_complex', filter_str,
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-t', str(duration),
+            output_video
+        ]
+        
+        ok, msg = self._run_ffmpeg(cmd)
+        if ok:
+            print(f'✅ 创建片尾Credits: {output_video}')
+        return ok
+
+
+
+
+
+# ==================== 便捷函数 ====================
+
+def add_bgm(video_path: str, audio_path: str, output_path: str = None, volume: float = 0.5) -> bool:
     effects = VideoEffects()
-    return effects.add_zoom_effect(input_video, output_video, zoom_type="in")
+    if not output_path:
+        output_path = video_path.replace('.mp4', '_bgm.mp4')
+    return effects.add_background_music(video_path, output_path, audio_path, volume)
 
-
-def create_hero_intro(input_video: str, output_video: str, title: str) -> bool:
-    """创建开场标题"""
+def create_intro(title: str, output_path: str = None, style: str = 'cinematic') -> bool:
     effects = VideoEffects()
-    return effects.create_hero_shot(input_video, output_video, title)
+    if not output_path:
+        output_path = 'intro.mp4'
+    return effects.add_opening_title(output_path, title, style=style)
 
-
-def apply_cinematic_grade(input_video: str, output_video: str) -> bool:
-    """应用电影感调色"""
+def create_credits(credits, output_path: str = None) -> bool:
     effects = VideoEffects()
-    return effects.add_color_grade(input_video, output_video, preset="cinematic")
+    if not output_path:
+        output_path = 'credits.mp4'
+    return effects.add_ending_credits(output_path, credits)
+
+def apply_lut_grade(video_path: str, output_path: str = None, lut: str = 'cinematic') -> bool:
+    effects = VideoEffects()
+    if not output_path:
+        output_path = video_path.replace('.mp4', f'_{lut}.mp4')
+    return effects.apply_lut(video_path, output_path, lut)
