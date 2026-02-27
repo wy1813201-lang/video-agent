@@ -42,3 +42,4 @@ output/
 # API 密钥（不要提交）
 config/api_keys.json
 .env
+asset/
