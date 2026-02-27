@@ -5,10 +5,19 @@
 
 import asyncio
 import json
+import os
+import sys
+import requests
+from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 from datetime import datetime
+
+# 确保 src 目录在路径中
+sys.path.insert(0, os.path.dirname(__file__))
+
+CONFIG_PATH = Path(__file__).parent.parent / "config" / "api_keys.json"
 
 
 class Stage(Enum):
@@ -335,26 +344,183 @@ class WorkflowManager:
     # ------------------------------------------------------------------ #
 
     async def generate_script(self, config):
-        """生成剧本 - 集成 Opus"""
-        # TODO: 调用实际的 Opus API
-        pass
+        """生成剧本 - 调用 ScriptGenerator"""
+        from script_generator import ScriptGenerator
+
+        with open(CONFIG_PATH) as f:
+            api_config = json.load(f)
+
+        script_gen = ScriptGenerator(config, api_config)
+        topic = getattr(config, "topic", "短剧")
+        episodes = getattr(config, "episodes", 3)
+
+        parts = []
+        for i in range(1, episodes + 1):
+            ep = await script_gen.generate_episode(topic, i, episodes)
+            parts.append(ep)
+
+        return "\n\n---\n\n".join(parts)
 
     async def generate_prompts(self, script):
-        """生成提示词"""
-        # TODO: 调用 PromptBuilder + CharacterExtractor
-        pass
+        """从剧本提取图像提示词"""
+        with open(CONFIG_PATH) as f:
+            api_config = json.load(f)
+
+        quality_suffix = api_config.get("prompt", {}).get(
+            "image_quality_suffix", "high quality, 8k, detailed, masterpiece"
+        )
+        aspect_ratio = api_config.get("prompt", {}).get("default_aspect_ratio", "9:16")
+
+        prompts = []
+        for block in script.split("场景"):
+            text = block.strip()
+            if not text:
+                continue
+            # 取前120字作为场景描述
+            desc = text[:120].replace("\n", " ")
+            prompts.append(
+                f"cinematic scene, {desc}, {quality_suffix}, aspect ratio {aspect_ratio}"
+            )
+
+        return prompts if prompts else [
+            f"cinematic short drama scene, {quality_suffix}"
+        ]
 
     async def generate_image(self, prompt):
-        """生成图像"""
-        # TODO: 调用 Midjourney/SD/即梦
-        pass
+        """生成图像 - 调用 cozex 图像 API"""
+        with open(CONFIG_PATH) as f:
+            api_config = json.load(f)
+
+        img_cfg = api_config.get("image", {}).get("cozex", {})
+        if not img_cfg.get("enabled"):
+            # fallback: 返回空路径，不阻断流程
+            self.notify("⚠️ 图像 API 未启用，跳过图像生成")
+            return ""
+
+        api_key = img_cfg["api_key"]
+        base_url = img_cfg["base_url"].rstrip("/")
+        model = img_cfg.get("model", "doubao-seedream-5-0-260128")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": "1024x1792",  # 9:16
+        }
+
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: requests.post(
+                f"{base_url}/v1/images/generations",
+                headers=headers,
+                json=payload,
+                timeout=60,
+            ),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        image_url = data["data"][0].get("url", "")
+        if not image_url:
+            raise Exception("图像 API 未返回 URL")
+
+        # 下载图像
+        output_dir = Path(img_cfg.get("output_dir", "~/Desktop/ShortDrama")).expanduser()
+        images_dir = output_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        img_path = images_dir / f"image_{timestamp}.png"
+
+        img_resp = await loop.run_in_executor(
+            None, lambda: requests.get(image_url, timeout=60)
+        )
+        img_resp.raise_for_status()
+        img_path.write_bytes(img_resp.content)
+
+        self.notify(f"🖼️ 图像已保存: {img_path.name}")
+        return str(img_path)
 
     async def generate_video(self, image_path):
-        """生成视频"""
-        # TODO: 调用可灵/即梦/Pika
-        pass
+        """生成视频 - 调用 JimengVideoClient"""
+        from jimeng_client import JimengVideoClient
+
+        with open(CONFIG_PATH) as f:
+            api_config = json.load(f)
+
+        video_cfg = api_config.get("video", {}).get("jimeng", {})
+        if not video_cfg.get("enabled"):
+            self.notify("⚠️ 即梦视频 API 未启用，跳过视频生成")
+            return ""
+
+        client = JimengVideoClient()
+
+        # 用图像路径对应的提示词（或用通用提示词）
+        prompt_suffix = api_config.get("prompt", {}).get(
+            "video_quality_suffix", "smooth motion, cinematic, high quality video"
+        )
+        prompt = f"cinematic short drama scene, {prompt_suffix}"
+
+        resolution = video_cfg.get("default_resolution", "720p")
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: client.video_generation(
+                prompt=prompt,
+                resolution=resolution,
+                aspect_ratio="9:16",
+            ),
+        )
+
+        video_path = result.get("video_path", "")
+        self.notify(f"🎬 视频已保存: {Path(video_path).name if video_path else '无'}")
+        return video_path
 
     async def assemble_videos(self, videos):
-        """合成视频"""
-        # TODO: 调用 FFmpeg
-        pass
+        """合成视频 - 调用 FFmpeg 拼接"""
+        valid = [v for v in videos if v and Path(v).exists()]
+        if not valid:
+            self.notify("⚠️ 无有效视频片段，跳过合成")
+            return ""
+
+        with open(CONFIG_PATH) as f:
+            api_config = json.load(f)
+
+        output_dir = Path(
+            api_config.get("video", {}).get("jimeng", {}).get(
+                "output_dir", "~/Desktop/ShortDrama"
+            )
+        ).expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        list_file = output_dir / f"concat_{timestamp}.txt"
+        output_file = output_dir / f"final_{timestamp}.mp4"
+
+        # 写 ffmpeg concat 列表
+        list_file.write_text(
+            "\n".join(f"file '{v}'" for v in valid), encoding="utf-8"
+        )
+
+        cmd = (
+            f"ffmpeg -y -f concat -safe 0 -i '{list_file}' "
+            f"-c copy '{output_file}' 2>&1"
+        )
+
+        loop = asyncio.get_event_loop()
+        proc = await loop.run_in_executor(None, lambda: os.popen(cmd).read())
+
+        list_file.unlink(missing_ok=True)
+
+        if output_file.exists():
+            self.notify(f"✅ 最终视频: {output_file}")
+            return str(output_file)
+        else:
+            self.notify(f"❌ FFmpeg 合成失败:\n{proc}")
+            return ""

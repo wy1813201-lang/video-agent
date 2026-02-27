@@ -1,6 +1,7 @@
 """
 角色一致性模块
 确保跨场景的角色外观、服装、性格保持一致
+参考火宝短剧架构优化：增加 seed_value、role、reference_images、voice_style 字段
 """
 
 import re
@@ -19,6 +20,12 @@ class CharacterTrait:
     gender: str = ""                   # 性别
     extra_tags: List[str] = field(default_factory=list)  # 额外提示词标签
 
+    # === 火宝架构新增字段 ===
+    seed_value: Optional[int] = None   # 图像生成种子值，确保角色外观一致性
+    role: str = ""                     # 角色定位（如：protagonist/antagonist/supporting）
+    reference_images: List[str] = field(default_factory=list)  # 参考图路径或URL列表
+    voice_style: str = ""              # 语音风格（如：温柔女声、低沉男声）
+
     def to_prompt_fragment(self) -> str:
         """转换为图像提示词片段"""
         parts = []
@@ -32,6 +39,27 @@ class CharacterTrait:
             parts.extend(self.extra_tags)
         return ", ".join(parts)
 
+    def to_dict(self) -> dict:
+        """序列化为字典，用于持久化"""
+        return {
+            "name": self.name,
+            "appearance": self.appearance,
+            "outfit": self.outfit,
+            "personality": self.personality,
+            "age_range": self.age_range,
+            "gender": self.gender,
+            "extra_tags": self.extra_tags,
+            "seed_value": self.seed_value,
+            "role": self.role,
+            "reference_images": self.reference_images,
+            "voice_style": self.voice_style,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CharacterTrait":
+        """从字典反序列化"""
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
 
 # 默认角色模板库
 DEFAULT_CHARACTER_TEMPLATES: Dict[str, CharacterTrait] = {
@@ -42,7 +70,11 @@ DEFAULT_CHARACTER_TEMPLATES: Dict[str, CharacterTrait] = {
         personality="determined, emotional",
         age_range="early 20s",
         gender="female",
-        extra_tags=["protagonist", "detailed face"]
+        extra_tags=["protagonist", "detailed face"],
+        seed_value=42001,
+        role="protagonist",
+        reference_images=[],
+        voice_style="温柔女声",
     ),
     "男主": CharacterTrait(
         name="男主",
@@ -51,7 +83,11 @@ DEFAULT_CHARACTER_TEMPLATES: Dict[str, CharacterTrait] = {
         personality="confident, mysterious",
         age_range="mid 20s",
         gender="male",
-        extra_tags=["male protagonist", "detailed face"]
+        extra_tags=["male protagonist", "detailed face"],
+        seed_value=42002,
+        role="protagonist",
+        reference_images=[],
+        voice_style="低沉男声",
     ),
     "妈妈": CharacterTrait(
         name="妈妈",
@@ -60,7 +96,11 @@ DEFAULT_CHARACTER_TEMPLATES: Dict[str, CharacterTrait] = {
         personality="caring, warm",
         age_range="late 40s",
         gender="female",
-        extra_tags=["mother figure"]
+        extra_tags=["mother figure"],
+        seed_value=42003,
+        role="supporting",
+        reference_images=[],
+        voice_style="温和女声",
     ),
     "爸爸": CharacterTrait(
         name="爸爸",
@@ -69,7 +109,11 @@ DEFAULT_CHARACTER_TEMPLATES: Dict[str, CharacterTrait] = {
         personality="steady, protective",
         age_range="late 40s",
         gender="male",
-        extra_tags=["father figure"]
+        extra_tags=["father figure"],
+        seed_value=42004,
+        role="supporting",
+        reference_images=[],
+        voice_style="沉稳男声",
     ),
     "反派": CharacterTrait(
         name="反派",
@@ -78,7 +122,11 @@ DEFAULT_CHARACTER_TEMPLATES: Dict[str, CharacterTrait] = {
         personality="cunning, ruthless",
         age_range="30s to 40s",
         gender="male",
-        extra_tags=["antagonist", "villain"]
+        extra_tags=["antagonist", "villain"],
+        seed_value=42005,
+        role="antagonist",
+        reference_images=[],
+        voice_style="冷酷男声",
     ),
 }
 
@@ -116,17 +164,16 @@ class CharacterExtractor:
         custom_names = re.findall(r'^([^\[\]#\n:：]{1,8})[：:].+', script, re.MULTILINE)
         for name in custom_names:
             name = name.strip()
-            # 跳过已知关键词和旁白
             if name in ("旁白", "字幕", "画外音") or name in found:
                 continue
-            # 如果不在模板里，创建一个通用角色
             if name not in self.templates:
                 found[name] = CharacterTrait(
                     name=name,
                     appearance="character with distinct features",
                     outfit="appropriate attire",
                     personality="expressive",
-                    extra_tags=["supporting character", "detailed face"]
+                    extra_tags=["supporting character", "detailed face"],
+                    role="supporting",
                 )
 
         return found
@@ -148,13 +195,6 @@ class PromptEnhancer:
     def enhance(self, base_prompt: str, scene_text: str) -> str:
         """
         根据场景文本中出现的角色，增强基础提示词
-
-        Args:
-            base_prompt: 原始场景提示词
-            scene_text:  对应的剧本场景文本（用于检测角色）
-
-        Returns:
-            注入了角色特征的增强提示词
         """
         character_fragments = []
 
@@ -168,10 +208,9 @@ class PromptEnhancer:
                         character_fragments.append(fragment)
                     break
 
-        # 也检查自定义角色名
         for name, trait in self.characters.items():
             if name in CHARACTER_KEYWORDS:
-                continue  # 已处理
+                continue
             if name in scene_text:
                 fragment = trait.to_prompt_fragment()
                 if fragment:
@@ -183,12 +222,8 @@ class PromptEnhancer:
         character_str = " | ".join(character_fragments)
         return f"{base_prompt}, {character_str}, consistent character design"
 
-    def enhance_batch(
-        self, prompts: List[str], scene_texts: List[str]
-    ) -> List[str]:
+    def enhance_batch(self, prompts: List[str], scene_texts: List[str]) -> List[str]:
         """批量增强提示词列表"""
         if len(prompts) != len(scene_texts):
             raise ValueError("prompts 和 scene_texts 长度必须一致")
-        return [
-            self.enhance(p, s) for p, s in zip(prompts, scene_texts)
-        ]
+        return [self.enhance(p, s) for p, s in zip(prompts, scene_texts)]

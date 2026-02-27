@@ -1,144 +1,167 @@
 """
-即梦 AI (Jimeng) 图像/视频生成客户端
-字节跳动即梦 AI - https://jimeng.jianying.com
-API 文档: https://www.volcengine.com/docs/85128
+即梦 AI (Jimeng) 视频生成客户端
+火山引擎视觉智能 API
 """
 
 import json
-import time
 import requests
+import hashlib
+import hmac
 from pathlib import Path
 from datetime import datetime
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "api_keys.json"
 
 
-class JimengClient:
-    """即梦 AI 客户端（火山引擎 Visual API）"""
+def sign(key, msg):
+    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
 
-    BASE_URL = "https://visual.volcengineapi.com"
+def getSignatureKey(key, dateStamp, regionName, serviceName):
+    kDate = sign(key.encode('utf-8'), dateStamp)
+    kRegion = sign(kDate, regionName)
+    kService = sign(kRegion, serviceName)
+    return sign(kService, 'request')
+
+
+def make_volc_request(ak, sk, action, body_params):
+    """火山引擎 V4 签名请求"""
+    host = 'visual.volcengineapi.com'
+    region = 'cn-north-1'
+    service = 'cv'
+    
+    t = datetime.utcnow()
+    current_date = t.strftime('%Y%m%dT%H%M%SZ')
+    datestamp = t.strftime('%Y%m%d')
+    
+    query_params = {'Action': action, 'Version': '2022-08-31'}
+    req_query = '&'.join([f"{k}={v}" for k, v in sorted(query_params.items())])
+    req_body = json.dumps(body_params)
+    
+    signed_headers = 'content-type;host;x-content-sha256;x-date'
+    payload_hash = hashlib.sha256(req_body.encode('utf-8')).hexdigest()
+    canonical_headers = f'content-type:application/json\nhost:{host}\nx-content-sha256:{payload_hash}\nx-date:{current_date}\n'
+    canonical_request = f"POST\n/\n{req_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    
+    algorithm = 'HMAC-SHA256'
+    credential_scope = f'{datestamp}/{region}/{service}/request'
+    string_to_sign = f'{algorithm}\n{current_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()}'
+    
+    signing_key = getSignatureKey(sk, datestamp, region, service)
+    signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+    
+    authorization_header = f'{algorithm} Credential={ak}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}'
+    
+    headers = {
+        'X-Date': current_date,
+        'Authorization': authorization_header,
+        'X-Content-Sha256': payload_hash,
+        'Content-Type': 'application/json'
+    }
+    
+    return requests.post(f'https://{host}/?{req_query}', headers=headers, data=req_body)
+
+
+class JimengVideoClient:
+    """即梦视频生成客户端"""
 
     def __init__(self):
         with open(CONFIG_PATH) as f:
             config = json.load(f)
 
-        cfg = config.get("jimeng", config.get("video", {}).get("jimeng", {}))
+        cfg = config.get("video", {}).get("jimeng", {})
         self.access_key = cfg.get("access_key", "")
-        self.secret_key = cfg.get("secret_key", "")
-        self.api_key = cfg.get("api_key", "")  # 也支持直接 API key
-        self.base_url = cfg.get("base_url", self.BASE_URL).rstrip("/")
+        self.secret_key = cfg.get("secret_key", "")  # base64 编码的 SK
+        self.models = cfg.get("models", {})
+        self.default_resolution = cfg.get("default_resolution", "720p")
 
         output_dir = cfg.get("output_dir", "~/Desktop/ShortDrama")
         self.output_dir = Path(output_dir).expanduser()
+        self.videos_dir = self.output_dir / "videos"
+        self.videos_dir.mkdir(parents=True, exist_ok=True)
 
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Content-Type": "application/json",
-        })
-        if self.api_key:
-            self.session.headers["Authorization"] = f"Bearer {self.api_key}"
-
-    def _save_file(self, url: str, subdir: str, prefix: str, ext: str) -> Path:
-        dest_dir = self.output_dir / subdir
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = dest_dir / f"{prefix}_{timestamp}.{ext}"
-        resp = requests.get(url, timeout=120)
-        resp.raise_for_status()
-        dest.write_bytes(resp.content)
-        return dest
-
-    def image_generation(self, prompt: str, negative_prompt: str = "",
-                         width: int = 1080, height: int = 1920,
-                         model_version: str = "high_aes_general_v21_L") -> dict:
-        """
-        文生图
-        Action=CVProcess, req_key=high_aes_general_v21_L
-        """
-        payload = {
-            "req_key": model_version,
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "width": width,
-            "height": height,
-            "return_url": True,
-            "logo_info": {"add_logo": False},
-        }
-        params = {"Action": "CVProcess", "Version": "2022-08-31"}
-        resp = self.session.post(self.base_url, params=params, json=payload, timeout=120)
-        resp.raise_for_status()
+    def video_generation(
+        self,
+        prompt: str,
+        resolution: str = "720p",
+        aspect_ratio: str = "16:9",
+        frames: int = 121,
+        seed: int = -1,
+        max_wait: int = 300
+    ) -> dict:
+        """生成视频"""
+        resolution = resolution.lower().replace("p", "p")
+        model_config = self.models.get(resolution, {})
+        req_key = model_config.get("req_key", "jimeng_t2v_v30")
+        
+        print(f"[Jimeng] 生成: {prompt[:30]}... | {resolution}")
+        
+        # 提交任务
+        resp = make_volc_request(
+            self.access_key, 
+            self.secret_key,  # 使用 base64 编码的 SK
+            'CVSync2AsyncSubmitTask',
+            {
+                "req_key": req_key,
+                "prompt": prompt,
+                "seed": seed,
+                "frames": frames,
+                "aspect_ratio": aspect_ratio
+            }
+        )
+        
         result = resp.json()
-
-        try:
-            image_url = result["data"]["image_urls"][0]
-            saved = self._save_file(image_url, "images", "jimeng_image", "jpg")
-            result["saved_path"] = str(saved)
-            print(f"[JimengClient] Image saved: {saved}")
-        except Exception as e:
-            print(f"[JimengClient] Warning: could not save image — {e}")
-
-        return result
-
-    def text_to_video(self, prompt: str, negative_prompt: str = "",
-                      width: int = 1080, height: int = 1920,
-                      duration: int = 5,
-                      poll: bool = True, max_wait: int = 300) -> dict:
-        """
-        文生视频（即梦视频生成）
-        """
-        payload = {
-            "req_key": "jimeng_video_generation",
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "width": width,
-            "height": height,
-            "duration": duration,
-            "return_url": True,
-        }
-        params = {"Action": "CVProcess", "Version": "2022-08-31"}
-        resp = self.session.post(self.base_url, params=params, json=payload, timeout=60)
-        resp.raise_for_status()
-        result = resp.json()
-
-        if not poll:
-            return result
-
+        
+        if result.get("code") != 10000:
+            raise Exception(f"提交失败: {result.get('message')}")
+        
         task_id = result.get("data", {}).get("task_id")
-        if not task_id:
-            # 同步返回
-            try:
-                video_url = result["data"]["video_url"]
-                saved = self._save_file(video_url, "videos", "jimeng_video", "mp4")
-                result["saved_path"] = str(saved)
-                print(f"[JimengClient] Video saved: {saved}")
-            except Exception as e:
-                print(f"[JimengClient] Warning: could not save video — {e}")
-            return result
+        print(f"[Jimeng] 任务ID: {task_id}")
+        
+        # 轮询等待结果
+        import time
+        for i in range(max_wait // 3):
+            time.sleep(3)
+            
+            resp = make_volc_request(
+                self.access_key,
+                self.secret_key,
+                'CVSync2AsyncGetResult',
+                {
+                    "req_key": req_key,
+                    "task_id": task_id
+                }
+            )
+            
+            result = resp.json()
+            status = result.get("data", {}).get("status")
+            
+            print(f"[Jimeng] 状态: {status}")
+            
+            if status == 'done':
+                video_url = result.get("data", {}).get("video_url")
+                break
+            elif status in ['not_found', 'expired']:
+                raise Exception("任务失败或过期")
+        else:
+            raise Exception("等待超时")
+        
+        # 下载视频
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_path = self.videos_dir / f"video_{timestamp}.mp4"
+        
+        resp = requests.get(video_url)
+        resp.raise_for_status()
+        
+        with open(video_path, "wb") as f:
+            f.write(resp.content)
+        
+        print(f"[Jimeng] 保存: {video_path}")
+        
+        return {
+            "video_path": str(video_path),
+            "video_url": video_url,
+            "resolution": resolution
+        }
 
-        return self._poll_task(task_id, max_wait)
 
-    def _poll_task(self, task_id: str, max_wait: int = 300, interval: int = 5) -> dict:
-        elapsed = 0
-        params = {"Action": "CVGetResult", "Version": "2022-08-31"}
-        while elapsed < max_wait:
-            time.sleep(interval)
-            elapsed += interval
-            r = self.session.post(self.base_url, params=params,
-                                  json={"task_id": task_id}, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            status = data.get("data", {}).get("status", "")
-            if status in ("done", "succeed", "completed"):
-                try:
-                    video_url = data["data"]["video_url"]
-                    saved = self._save_file(video_url, "videos", "jimeng_video", "mp4")
-                    data["saved_path"] = str(saved)
-                    print(f"[JimengClient] Video saved: {saved}")
-                except Exception as e:
-                    print(f"[JimengClient] Warning: could not save video — {e}")
-                return data
-            if status in ("failed", "error"):
-                raise RuntimeError(f"Jimeng task failed: {data}")
-            print(f"[JimengClient] Waiting... {elapsed}s (status: {status})")
-
-        raise TimeoutError(f"Jimeng task timed out after {max_wait}s")
+JimengClient = JimengVideoClient
