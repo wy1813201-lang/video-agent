@@ -1,64 +1,17 @@
 """
 即梦 AI (Jimeng) 视频生成客户端
-火山引擎视觉智能 API
+火山引擎视觉智能 API - 使用官方 SDK
 """
 
 import json
 import requests
-import hashlib
-import hmac
 from pathlib import Path
 from datetime import datetime
+from volcengine.auth.SignerV4 import SignerV4
+from volcengine.Credentials import Credentials
+from volcengine.base.Request import Request
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "api_keys.json"
-
-
-def sign(key, msg):
-    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
-
-def getSignatureKey(key, dateStamp, regionName, serviceName):
-    kDate = sign(key.encode('utf-8'), dateStamp)
-    kRegion = sign(kDate, regionName)
-    kService = sign(kRegion, serviceName)
-    return sign(kService, 'request')
-
-
-def make_volc_request(ak, sk, action, body_params):
-    """火山引擎 V4 签名请求"""
-    host = 'visual.volcengineapi.com'
-    region = 'cn-north-1'
-    service = 'cv'
-    
-    t = datetime.utcnow()
-    current_date = t.strftime('%Y%m%dT%H%M%SZ')
-    datestamp = t.strftime('%Y%m%d')
-    
-    query_params = {'Action': action, 'Version': '2022-08-31'}
-    req_query = '&'.join([f"{k}={v}" for k, v in sorted(query_params.items())])
-    req_body = json.dumps(body_params)
-    
-    signed_headers = 'content-type;host;x-content-sha256;x-date'
-    payload_hash = hashlib.sha256(req_body.encode('utf-8')).hexdigest()
-    canonical_headers = f'content-type:application/json\nhost:{host}\nx-content-sha256:{payload_hash}\nx-date:{current_date}\n'
-    canonical_request = f"POST\n/\n{req_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    
-    algorithm = 'HMAC-SHA256'
-    credential_scope = f'{datestamp}/{region}/{service}/request'
-    string_to_sign = f'{algorithm}\n{current_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()}'
-    
-    signing_key = getSignatureKey(sk, datestamp, region, service)
-    signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
-    
-    authorization_header = f'{algorithm} Credential={ak}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}'
-    
-    headers = {
-        'X-Date': current_date,
-        'Authorization': authorization_header,
-        'X-Content-Sha256': payload_hash,
-        'Content-Type': 'application/json'
-    }
-    
-    return requests.post(f'https://{host}/?{req_query}', headers=headers, data=req_body)
 
 
 class JimengVideoClient:
@@ -70,7 +23,12 @@ class JimengVideoClient:
 
         cfg = config.get("video", {}).get("jimeng", {})
         self.access_key = cfg.get("access_key", "")
-        self.secret_key = cfg.get("secret_key", "")  # base64 编码的 SK
+        self.secret_key = cfg.get("secret_key", "")  # 直接使用 base64 字符串
+        
+        self.host = 'visual.volcengineapi.com'
+        self.region = 'cn-north-1'
+        self.service = 'cv'
+        
         self.models = cfg.get("models", {})
         self.default_resolution = cfg.get("default_resolution", "720p")
 
@@ -79,11 +37,21 @@ class JimengVideoClient:
         self.videos_dir = self.output_dir / "videos"
         self.videos_dir.mkdir(parents=True, exist_ok=True)
 
+    def _sign_request(self, request):
+        """使用火山引擎 SDK 签名"""
+        credentials = Credentials(
+            self.access_key, 
+            self.secret_key, 
+            self.service,  # service
+            self.region    # region
+        )
+        SignerV4.sign(request, credentials)
+
     def video_generation(
         self,
         prompt: str,
         resolution: str = "720p",
-        aspect_ratio: str = "16:9",
+        aspect_ratio: str = "9:16",
         frames: int = 121,
         seed: int = -1,
         max_wait: int = 300
@@ -95,19 +63,30 @@ class JimengVideoClient:
         
         print(f"[Jimeng] 生成: {prompt[:30]}... | {resolution}")
         
-        # 提交任务
-        resp = make_volc_request(
-            self.access_key, 
-            self.secret_key,  # 使用 base64 编码的 SK
-            'CVSync2AsyncSubmitTask',
-            {
-                "req_key": req_key,
-                "prompt": prompt,
-                "seed": seed,
-                "frames": frames,
-                "aspect_ratio": aspect_ratio
-            }
-        )
+        # 构建请求
+        request = Request()
+        request.host = self.host
+        request.method = 'POST'
+        request.path = '/'
+        request.query = {'Action': 'CVSync2AsyncSubmitTask', 'Version': '2022-08-31'}
+        request.body = json.dumps({
+            "req_key": req_key,
+            "prompt": prompt,
+            "seed": seed,
+            "frames": frames,
+            "aspect_ratio": aspect_ratio
+        }).encode('utf-8')
+        request.headers = {
+            'Content-Type': 'application/json',
+            'Host': self.host
+        }
+        
+        # 签名
+        self._sign_request(request)
+        
+        # 发送请求
+        url = f"https://{self.host}/?Action=CVSync2AsyncSubmitTask&Version=2022-08-31"
+        resp = requests.post(url, headers=request.headers, data=request.body)
         
         result = resp.json()
         
@@ -122,15 +101,25 @@ class JimengVideoClient:
         for i in range(max_wait // 3):
             time.sleep(3)
             
-            resp = make_volc_request(
-                self.access_key,
-                self.secret_key,
-                'CVSync2AsyncGetResult',
-                {
-                    "req_key": req_key,
-                    "task_id": task_id
-                }
-            )
+            # 查询任务
+            request = Request()
+            request.host = self.host
+            request.method = 'POST'
+            request.path = '/'
+            request.query = {'Action': 'CVSync2AsyncGetResult', 'Version': '2022-08-31'}
+            request.body = json.dumps({
+                "req_key": req_key,
+                "task_id": task_id
+            }).encode('utf-8')
+            request.headers = {
+                'Content-Type': 'application/json',
+                'Host': self.host
+            }
+            
+            self._sign_request(request)
+            
+            url = f"https://{self.host}/?Action=CVSync2AsyncGetResult&Version=2022-08-31"
+            resp = requests.post(url, headers=request.headers, data=request.body)
             
             result = resp.json()
             status = result.get("data", {}).get("status")
