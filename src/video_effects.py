@@ -704,3 +704,76 @@ def apply_lut_grade(video_path: str, output_path: str = None, lut: str = 'cinema
     if not output_path:
         output_path = video_path.replace('.mp4', f'_{lut}.mp4')
     return effects.apply_lut(video_path, output_path, lut)
+
+    def beat_sync_cut(
+        self,
+        video_path: str,
+        output_path: str,
+        bpm: int = 120,
+        fade_duration: float = 0.3
+    ) -> bool:
+        """根据 BPM 节拍进行节奏剪辑
+        
+        Args:
+            bpm: 每分钟节拍数
+            fade_duration: 每个片段淡入淡出时长
+        """
+        # 计算每个节拍的时长
+        beat_duration = 60.0 / bpm
+        
+        # 获取视频时长
+        duration = self._get_duration(video_path)
+        
+        # 计算节拍数
+        num_beats = int(duration / beat_duration)
+        
+        # 构建视频片段列表
+        segments = []
+        for i in range(num_beats):
+            start = i * beat_duration
+            end = min((i + 1) * beat_duration, duration)
+            segments.append((start, end))
+        
+        print(f"[Beat Sync] {num_beats} beats at {bpm} BPM")
+        
+        # 使用 concat 合并
+        temp_files = []
+        for i, (start, end) in enumerate(segments):
+            temp_file = self.output_dir / f"beat_{i}.mp4"
+            temp_files.append(str(temp_file))
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-ss", str(start),
+                "-t", str(end - start),
+                "-c", "copy",
+                str(temp_file)
+            ]
+            subprocess.run(cmd, capture_output=True)
+        
+        # 合并
+        list_file = self.output_dir / "beats.txt"
+        with open(list_file, 'w') as f:
+            for tf in temp_files:
+                f.write(f"file '{tf}'\n")
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_file),
+            "-c", "copy",
+            output_path
+        ]
+        
+        ok, msg = self._run_ffmpeg(cmd)
+        
+        # 清理
+        for tf in temp_files:
+            Path(tf).unlink(missing_ok=True)
+        list_file.unlink(missing_ok=True)
+        
+        if ok:
+            print(f"✅ 节奏剪辑: {output_path}")
+        return ok

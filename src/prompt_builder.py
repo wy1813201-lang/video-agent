@@ -15,27 +15,69 @@ from enum import Enum
 class CameraMovement(str, Enum):
     """专业运镜指令 - 基于 Seedance 2.0 最佳实践"""
     # 推进/拉远
-    PUSH_IN = "push-in, camera moves closer"
-    PULL_BACK = "pull-back, camera retreats"
-    DOLLY_ZOOM = "dolly zoom, vertigo effect"
+    PUSH_IN = "push-in shot, camera slowly moves closer to subject, depth increasing"
+    PULL_BACK = "pull-back shot, camera retreats revealing wider scene"
+    DOLLY_ZOOM = "dolly zoom, simultaneous dolly-out zoom-in, vertigo effect"
+    DOLLY_IN = "dolly-in, camera physically moves forward on track"
 
     # 角度
-    LOW_ANGLE = "low angle, looking up"
-    HIGH_ANGLE = "high angle, looking down"
-    EYE_LEVEL = "eye level, neutral angle"
+    LOW_ANGLE = "low angle shot, camera below eye level, looking up, heroic perspective"
+    HIGH_ANGLE = "high angle shot, camera above subject, looking down, bird's eye"
+    EYE_LEVEL = "eye level shot, neutral angle, natural perspective"
+    DUTCH_ANGLE = "dutch angle, tilted camera, tension and unease"
+    WORM_EYE = "worm's eye view, extreme low angle, ground level upward"
 
     # 运动
-    TRACKING = "tracking shot, following subject"
-    PAN = "pan left/right, horizontal sweep"
-    TILT = "tilt up/down, vertical sweep"
-    ORBIT = "orbiting shot, circling around"
-    CRANE = "crane shot, vertical movement"
+    TRACKING = "tracking shot, camera follows subject laterally, smooth parallel movement"
+    PAN = "pan shot, camera pivots horizontally left to right, sweeping reveal"
+    TILT = "tilt shot, camera pivots vertically upward, grand reveal"
+    ORBIT = "orbit shot, camera circles 360° around subject, dynamic rotation"
+    CRANE = "crane shot, camera rises vertically, aerial elevation"
+    ARC = "arc shot, camera moves in curved path around subject"
+    WHIP_PAN = "whip pan, ultra-fast horizontal pan, motion blur transition"
 
     # 特效
-    SLOW_MO = "slow motion, 0.5x speed"
-    FAST_MO = "fast motion, time-lapse"
-    HANDHELD = "handheld camera, shake effect"
-    STABILIZED = "stabilized, smooth movement"
+    SLOW_MO = "slow motion 0.5x speed, time dilation, every detail visible"
+    FAST_MO = "fast motion time-lapse, accelerated movement"
+    HANDHELD = "handheld camera, subtle organic shake, documentary feel"
+    STABILIZED = "gimbal stabilized, ultra-smooth glide, floating movement"
+    RACK_FOCUS = "rack focus, shallow depth of field shifts between subjects"
+    SNAP_ZOOM = "snap zoom, sudden rapid zoom-in for dramatic emphasis"
+
+
+# 运镜组合模板 - 针对短剧常见场景
+CAMERA_TEMPLATES = {
+    "dramatic_reveal": [
+        CameraMovement.LOW_ANGLE,
+        CameraMovement.CRANE,
+        CameraMovement.SLOW_MO,
+    ],
+    "emotional_closeup": [
+        CameraMovement.RACK_FOCUS,
+        CameraMovement.PUSH_IN,
+        CameraMovement.SLOW_MO,
+    ],
+    "action_chase": [
+        CameraMovement.TRACKING,
+        CameraMovement.HANDHELD,
+        CameraMovement.WHIP_PAN,
+    ],
+    "romantic_scene": [
+        CameraMovement.ORBIT,
+        CameraMovement.STABILIZED,
+        CameraMovement.RACK_FOCUS,
+    ],
+    "establishing": [
+        CameraMovement.CRANE,
+        CameraMovement.PAN,
+        CameraMovement.PULL_BACK,
+    ],
+    "confrontation": [
+        CameraMovement.DUTCH_ANGLE,
+        CameraMovement.SNAP_ZOOM,
+        CameraMovement.LOW_ANGLE,
+    ],
+}
 
 
 class ShotType(str, Enum):
