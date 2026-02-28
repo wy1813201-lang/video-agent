@@ -26,6 +26,10 @@ class CharacterTrait:
     reference_images: List[str] = field(default_factory=list)  # 参考图路径或URL列表
     voice_style: str = ""              # 语音风格（如：温柔女声、低沉男声）
 
+    # === IP-Adapter 专用 ===
+    ip_adapter_scale: float = 0.7     # IP-Adapter 一致性强度 (0-1)
+    use_ip_adapter: bool = True        # 是否启用 IP-Adapter
+
     def to_prompt_fragment(self) -> str:
         """转换为图像提示词片段"""
         parts = []
@@ -53,6 +57,8 @@ class CharacterTrait:
             "role": self.role,
             "reference_images": self.reference_images,
             "voice_style": self.voice_style,
+            "ip_adapter_scale": self.ip_adapter_scale,
+            "use_ip_adapter": self.use_ip_adapter,
         }
 
     @classmethod

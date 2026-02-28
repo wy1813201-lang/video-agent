@@ -80,7 +80,9 @@ class JimengVideoClient:
 
         print(f"[Jimeng] 生成: {prompt[:30]}... | {resolution}")
 
-        async with aiohttp.ClientSession() as session:
+        # 禁用 SSL 证书验证（火山引擎 SSL 问题）
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
             # 提交任务
             req = self._build_request('CVSync2AsyncSubmitTask', {
                 "req_key": req_key,

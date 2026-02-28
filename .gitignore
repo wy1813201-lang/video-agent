@@ -43,3 +43,4 @@ output/
 config/api_keys.json
 .env
 asset/
+src/__pycache__/
