@@ -70,7 +70,10 @@ def main():
         result = client.generate_script(prompt)
         
         if args.output:
-            os.makedirs(os.path.dirname(args.output), exist_ok=True)
+            output_path = args.output
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
             with open(args.output, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             print(f"\n✅ 剧本已保存到: {args.output}")
