@@ -63,7 +63,9 @@ class GeminiWebClient:
         # 返回模拟结果（实际需要浏览器自动化）
         return {
             "source": "gemini_web",
-            "prompt": prompt,
+            "original_prompt": prompt,
+            "prompt": full_prompt,
+            "require_json": require_json,
             "timestamp": self._get_timestamp(),
             "status": "not_implemented",
             "message": "需要实现浏览器自动化",

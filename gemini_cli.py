@@ -17,6 +17,21 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 
+def _save_json_result(output_path: str, result: dict) -> str:
+    """
+    保存 JSON 结果并返回标准化后的输出路径。
+    兼容仅提供文件名（无目录）的场景。
+    """
+    normalized_path = os.path.abspath(os.path.expanduser(output_path))
+    output_dir = os.path.dirname(normalized_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(normalized_path, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    return normalized_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Gemini 网页版剧本生成器")
     parser.add_argument("--prompt", "-p", type=str, help="自定义提示词")
@@ -66,23 +81,45 @@ def main():
     # 尝试导入（如果实现了自动化）
     try:
         from gemini_web_client import GeminiWebClient
+    except ModuleNotFoundError as e:
+        print(f"\n❌ 无法导入 Gemini 客户端模块: {e}")
+        return 1
+
+    try:
         client = GeminiWebClient()
         result = client.generate_script(prompt)
-        
-        if args.output:
-            output_path = args.output
-            output_dir = os.path.dirname(output_path)
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir, exist_ok=True)
-            with open(args.output, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-            print(f"\n✅ 剧本已保存到: {args.output}")
-        else:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            
+    except TimeoutError as e:
+        print(f"\n❌ 调用 Gemini 超时: {e}")
+        return 2
+    except ConnectionError as e:
+        print(f"\n❌ 连接 Gemini 失败: {e}")
+        return 2
+    except ValueError as e:
+        print(f"\n❌ Gemini 返回内容格式异常: {e}")
+        return 2
     except Exception as e:
-        print(f"\n⚠️  自动化功能待实现: {e}")
+        print(f"\n❌ 调用 Gemini 失败（未分类错误）: {type(e).__name__}: {e}")
+        return 2
+
+    if args.output:
+        try:
+            saved_path = _save_json_result(args.output, result)
+            print(f"\n✅ 剧本已保存到: {saved_path}")
+        except TypeError as e:
+            print(f"\n❌ 结果无法序列化为 JSON: {e}")
+            return 3
+        except OSError as e:
+            print(f"\n❌ 写入输出文件失败: {e}")
+            return 3
+    else:
+        try:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        except TypeError as e:
+            print(f"\n❌ 结果无法序列化为 JSON: {e}")
+            return 3
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
