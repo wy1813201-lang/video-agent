@@ -3,6 +3,8 @@ IP-Adapter 图像生成器
 基于 diffusers 实现 IP-Adapter 角色一致性图像生成
 """
 
+from __future__ import annotations
+
 import os
 from typing import List, Optional, Union
 
@@ -26,7 +28,7 @@ class IPAdapterGenerator:
         self,
         model_path: str = "stabilityai/stable-diffusion-xl-base-1.0",
         ip_adapter_path: str = "h94/IP-Adapter",
-        device: str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu",
+        device: Optional[str] = None,
     ):
         """
         初始化 IP-Adapter 生成器
@@ -38,7 +40,10 @@ class IPAdapterGenerator:
         """
         if not HAS_DIFFUSERS:
             raise ImportError("需要安装 diffusers: pip install diffusers")
-        
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
         self.device = device
         self.model_path = model_path
         self.ip_adapter_path = ip_adapter_path
@@ -52,10 +57,15 @@ class IPAdapterGenerator:
         print(f"正在加载 IP-Adapter pipeline from {self.model_path}...")
         
         # 加载 SDXL + IP-Adapter pipeline
+        pipeline_kwargs = {
+            "torch_dtype": torch.float16 if self.device == "cuda" else torch.float32,
+        }
+        if self.device == "cuda":
+            pipeline_kwargs["variant"] = "fp16"
+
         self.pipeline = StableDiffusionXLAdapterPipeline.from_pretrained(
             self.model_path,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            variant="fp16",
+            **pipeline_kwargs,
         )
         
         # 加载 IP-Adapter 权重
@@ -127,6 +137,7 @@ class IPAdapterGenerator:
         
         # 生成图像
         try:
+            self.pipeline.set_ip_adapter_scale(ip_adapter_scale)
             images = self.pipeline(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
@@ -134,7 +145,6 @@ class IPAdapterGenerator:
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 generator=generator,
-                ip_adapter_scale=ip_adapter_scale,
             ).images
         except Exception as e:
             raise RuntimeError(f"图像生成失败: {e}") from e
