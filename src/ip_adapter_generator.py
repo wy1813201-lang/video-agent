@@ -4,11 +4,10 @@ IP-Adapter 图像生成器
 """
 
 import os
-from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 try:
-    from diffusers import StableDiffusionXLAdapterPipeline, StableDiffusionXLInpaintPipeline
+    from diffusers import StableDiffusionXLAdapterPipeline
     from diffusers.utils import load_image
     import torch
     from PIL import Image
