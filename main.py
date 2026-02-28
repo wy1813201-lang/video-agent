@@ -126,47 +126,51 @@ class ShortDramaAutomator:
         print("=" * 60)
 
         all_boards = []
+        try:
+            for ep in range(1, self.config.episodes + 1):
+                print(f"\n📝 第 {ep} 集")
 
-        for ep in range(1, self.config.episodes + 1):
-            print(f"\n📝 第 {ep} 集")
+                # 1. 生成剧本
+                if self.script_gen:
+                    script = await self.script_gen.generate_episode(
+                        topic=self.config.topic,
+                        episode_num=ep,
+                        total_episodes=self.config.episodes
+                    )
+                else:
+                    script = self._placeholder_script(ep)
+                print(f"   ✓ 剧本生成完成 ({len(script)} 字)")
 
-            # 1. 生成剧本
-            if self.script_gen:
-                script = await self.script_gen.generate_episode(
-                    topic=self.config.topic,
-                    episode_num=ep,
-                    total_episodes=self.config.episodes
-                )
-            else:
-                script = self._placeholder_script(ep)
-            print(f"   ✓ 剧本生成完成 ({len(script)} 字)")
+                # 2. 生成分镜
+                board = None
+                if self.storyboard_mgr:
+                    board = self.storyboard_mgr.generate_from_script(
+                        script, episode_num=ep, drama_title=self.config.topic
+                    )
+                    if self._auto_approve:
+                        self.storyboard_mgr.approve_all(board)
+                    board_path = self.storyboard_mgr.save(board)
+                    all_boards.append(board)
+                    print(f"   ✓ 分镜生成: {len(board.scenes)} 个场景 → {board_path}")
+                    print(f"   {self.storyboard_mgr.summary(board)}")
 
-            # 2. 生成分镜
-            board = None
-            if self.storyboard_mgr:
-                board = self.storyboard_mgr.generate_from_script(
-                    script, episode_num=ep, drama_title=self.config.topic
-                )
-                if self._auto_approve:
-                    self.storyboard_mgr.approve_all(board)
-                board_path = self.storyboard_mgr.save(board)
-                all_boards.append(board)
-                print(f"   ✓ 分镜生成: {len(board.scenes)} 个场景 → {board_path}")
-                print(f"   {self.storyboard_mgr.summary(board)}")
+                # 3. 生成图片提示词
+                if self.prompt_builder:
+                    prompts = self.prompt_builder.generate_scene_prompts(script)
+                else:
+                    prompts = self._placeholder_prompts(script)
+                print(f"   ✓ 图片提示词: {len(prompts)} 个")
 
-            # 3. 生成图片提示词
-            if self.prompt_builder:
-                prompts = self.prompt_builder.generate_scene_prompts(script)
-            else:
-                prompts = self._placeholder_prompts(script)
-            print(f"   ✓ 图片提示词: {len(prompts)} 个")
-
-            self.episodes_data.append({
-                "episode_num": ep,
-                "script": script,
-                "image_prompts": prompts,
-                "storyboard_id": board.storyboard_id if board else None,
-            })
+                self.episodes_data.append({
+                    "episode_num": ep,
+                    "script": script,
+                    "image_prompts": prompts,
+                    "storyboard_id": board.storyboard_id if board else None,
+                })
+        finally:
+            close_fn = getattr(self.script_gen, "close", None) if self.script_gen else None
+            if close_fn:
+                await close_fn()
 
         # 4. 保存结果
         output_file = self._save_results()

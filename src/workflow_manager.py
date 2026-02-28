@@ -371,12 +371,16 @@ class WorkflowManager:
         topic = getattr(config, "topic", "短剧")
         episodes = getattr(config, "episodes", 3)
 
-        parts = []
-        for i in range(1, episodes + 1):
-            ep = await script_gen.generate_episode(topic, i, episodes)
-            parts.append(ep)
-
-        return "\n\n---\n\n".join(parts)
+        try:
+            parts = []
+            for i in range(1, episodes + 1):
+                ep = await script_gen.generate_episode(topic, i, episodes)
+                parts.append(ep)
+            return "\n\n---\n\n".join(parts)
+        finally:
+            close_fn = getattr(script_gen, "close", None)
+            if close_fn:
+                await close_fn()
 
     async def generate_prompts(self, script):
         """从剧本提取图像提示词"""

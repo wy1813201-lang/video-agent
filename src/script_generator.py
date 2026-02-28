@@ -7,7 +7,7 @@
 import os
 import json
 import requests
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # 可以集成的 LLM 客户端
 OPENAI_AVAILABLE = False
@@ -52,6 +52,13 @@ class ScriptGenerator:
         # 初始化 LLM 客户端
         self.client = None
         self.client_type = None
+        self.gemini_web_client = None
+
+        gemini_web = self.api_config.get("script", {}).get("gemini_web", {})
+        self.gemini_web_config = gemini_web
+        if gemini_web.get("enabled"):
+            self.client_type = "gemini_web"
+            return
         
         # 优先使用自定义 Opus 端点
         custom_opus = self.api_config.get("script", {}).get("custom_opus", {})
@@ -86,7 +93,9 @@ class ScriptGenerator:
 请生成完整的剧本，包含场景描述和对话。每集内容要有变化，不要重复。"""
         
         try:
-            if self.client_type == "custom_opus":
+            if self.client_type == "gemini_web":
+                return await self._generate_gemini_web(user_prompt, topic, episode_num, total_episodes)
+            elif self.client_type == "custom_opus":
                 return await self._generate_custom_opus(user_prompt)
             elif self.client_type == "openai":
                 return await self._generate_openai(user_prompt)
@@ -141,6 +150,65 @@ class ScriptGenerator:
             temperature=0.8
         )
         return response.content[0].text
+
+    async def _generate_gemini_web(
+        self,
+        prompt: str,
+        topic: str,
+        episode_num: int,
+        total_episodes: int,
+    ) -> str:
+        """使用 Gemini 网页版生成结构化剧本，再转换为文本供工作流复用。"""
+        if self.gemini_web_client is None:
+            try:
+                from .gemini_web_client import GeminiWebClient
+            except ImportError:
+                from gemini_web_client import GeminiWebClient
+
+            self.gemini_web_client = GeminiWebClient(
+                headless=self.gemini_web_config.get("headless", True),
+                timeout_ms=self.gemini_web_config.get("timeout_ms", 120000),
+                gemini_url=self.gemini_web_config.get("url", "https://gemini.google.com/app"),
+            )
+
+        provider_prompt = (
+            f"{self.SYSTEM_PROMPT}\n\n"
+            f"请重点生成第{episode_num}/{total_episodes}集，主题是“{topic}”。\n"
+            f"{prompt}"
+        )
+        script_json = await self.gemini_web_client.generate_script(provider_prompt)
+        return self._script_json_to_text(script_json, episode_num)
+
+    async def close(self):
+        """释放外部资源。"""
+        if self.gemini_web_client:
+            await self.gemini_web_client.close()
+
+    def _script_json_to_text(self, script_json: Dict[str, Any], episode_num: int) -> str:
+        """把 Gemini JSON 剧本转成现有文本流程可复用格式。"""
+        title = script_json.get("title") or f"第{episode_num}集"
+        summary = script_json.get("summary", "")
+        scenes = script_json.get("scenes") or []
+
+        lines = [f"{title}"]
+        if summary:
+            lines.append(f"梗概: {summary}")
+        lines.append("")
+
+        for idx, scene in enumerate(scenes, start=1):
+            location = scene.get("location", "未知地点")
+            description = scene.get("description", "")
+            lines.append(f"场景{idx}: [{location}]")
+            if description:
+                lines.append(f"描述: {description}")
+
+            for dialogue in scene.get("dialogues") or []:
+                speaker = dialogue.get("speaker", "角色")
+                line = dialogue.get("line", "")
+                lines.append(f"{speaker}: {line}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
     
     def _generate_fallback(self, topic: str, episode_num: int) -> str:
         """生成示例剧本"""
