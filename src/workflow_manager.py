@@ -90,6 +90,20 @@ class WorkflowManager:
         with open(CONFIG_PATH) as f:
             return json.load(f)
 
+    def _get_ip_adapter_config(self, provider: str) -> Dict[str, Any]:
+        """读取并合并 IP-Adapter 配置。provider: image_cozex / video_jimeng"""
+        global_cfg = self.api_config.get("character_consistency", {}).get("ip_adapter", {})
+
+        provider_cfg = {}
+        if provider == "image_cozex":
+            provider_cfg = self.api_config.get("image", {}).get("cozex", {}).get("ip_adapter", {})
+        elif provider == "video_jimeng":
+            provider_cfg = self.api_config.get("video", {}).get("jimeng", {}).get("ip_adapter", {})
+
+        merged = dict(global_cfg)
+        merged.update(provider_cfg)
+        return merged
+
     # ------------------------------------------------------------------ #
     #  进度 & 审批
     # ------------------------------------------------------------------ #
@@ -370,21 +384,42 @@ class WorkflowManager:
             "image_quality_suffix", "high quality, 8k, detailed, masterpiece"
         )
         aspect_ratio = self.api_config.get("prompt", {}).get("default_aspect_ratio", "9:16")
+        ip_cfg = self._get_ip_adapter_config("image_cozex")
+        use_ip_adapter = bool(ip_cfg.get("enabled", False))
 
         prompts = []
+        scene_texts = []
         for block in script.split("场景"):
             text = block.strip()
             if not text:
                 continue
             # 取前120字作为场景描述
             desc = text[:120].replace("\n", " ")
+            scene_texts.append(text)
             prompts.append(
                 f"cinematic scene, {desc}, {quality_suffix}, aspect ratio {aspect_ratio}"
             )
 
-        return prompts if prompts else [
-            f"cinematic short drama scene, {quality_suffix}"
-        ]
+        if not prompts:
+            return [f"cinematic short drama scene, {quality_suffix}"]
+
+        if use_ip_adapter:
+            try:
+                from character_consistency import CharacterExtractor, PromptEnhancer
+                extractor = CharacterExtractor()
+                characters = extractor.extract_characters(script)
+                if characters:
+                    enhancer = PromptEnhancer(characters)
+                    prompts = enhancer.enhance_batch(
+                        prompts=prompts,
+                        scene_texts=scene_texts,
+                        use_ip_adapter=True,
+                    )
+            except Exception as e:
+                self.notify(f"⚠️ IP-Adapter 提示词增强失败，继续使用基础提示词: {e}")
+
+        self.state.scene_texts = scene_texts
+        return prompts
 
     async def generate_image(self, prompt):
         """生成图像 - 调用 cozex 图像 API"""

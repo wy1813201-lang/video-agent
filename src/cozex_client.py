@@ -7,6 +7,11 @@ import time
 import requests
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Optional
+try:
+    from ip_adapter_generator import IPAdapterGenerator
+except Exception:
+    IPAdapterGenerator = None
 
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "api_keys.json"
@@ -68,12 +73,103 @@ class CozexClient:
     def list_video_models(self) -> dict:
         return VIDEO_MODELS.copy()
 
+    def _generate_with_ip_adapter(
+        self,
+        prompt: str,
+        negative_prompt: str = "",
+        ip_adapter: Optional[Dict[str, Any]] = None,
+    ) -> Optional[dict]:
+        """使用本地 IP-Adapter 进行角色一致性图像生成。"""
+        ip_adapter = ip_adapter or {}
+        references = ip_adapter.get("reference_images") or ip_adapter.get("references") or []
+        if isinstance(references, str):
+            references = [references]
+        references = [r for r in references if r]
+        if not references:
+            return None
+
+        if IPAdapterGenerator is None:
+            print("[CozexClient] IP-Adapter unavailable, fallback to API: import failed")
+            return None
+        try:
+            model_path = ip_adapter.get("model_path", "stabilityai/stable-diffusion-xl-base-1.0")
+            adapter_path = ip_adapter.get("ip_adapter_path", "h94/IP-Adapter")
+            generator = IPAdapterGenerator(
+                model_path=model_path,
+                ip_adapter_path=adapter_path,
+                device=ip_adapter.get("device"),
+                attention_backend=ip_adapter.get("attention_backend", "auto"),
+            )
+        except Exception as e:
+            print(f"[CozexClient] IP-Adapter unavailable, fallback to API: {e}")
+            return None
+
+        try:
+            image = generator.generate_with_reference(
+                prompt=prompt,
+                reference_images=references,
+                negative_prompt=negative_prompt,
+                num_inference_steps=ip_adapter.get("num_inference_steps", 30),
+                guidance_scale=ip_adapter.get("guidance_scale", 7.5),
+                seed=ip_adapter.get("seed"),
+                ip_adapter_scale=ip_adapter.get("scale", 0.7),
+            )
+            dest_dir = self.output_dir / "images"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            saved = dest_dir / f"image_ip_adapter_{timestamp}.jpg"
+            image.save(saved)
+            print(f"[CozexClient] IP-Adapter image saved: {saved}")
+            return {
+                "data": [{"url": ""}],
+                "saved_path": str(saved),
+                "ip_adapter_used": True,
+            }
+        except Exception as e:
+            print(f"[CozexClient] IP-Adapter generation failed, fallback to API: {e}")
+            return None
+        finally:
+            try:
+                generator.unload()
+            except Exception:
+                pass
+
+    def generate_image(
+        self,
+        prompt: str,
+        model: str = None,
+        negative_prompt: str = "",
+        size: str = None,
+        use_ip_adapter: bool = False,
+        ip_adapter: Optional[Dict[str, Any]] = None,
+    ) -> dict:
+        """统一图像生成入口。"""
+        return self.image_generation(
+            prompt=prompt,
+            model=model,
+            negative_prompt=negative_prompt,
+            size=size,
+            use_ip_adapter=use_ip_adapter,
+            ip_adapter=ip_adapter,
+        )
+
     def image_generation(self, prompt: str, model: str = None,
-                         negative_prompt: str = "", size: str = None) -> dict:
+                         negative_prompt: str = "", size: str = None,
+                         use_ip_adapter: bool = False,
+                         ip_adapter: Optional[Dict[str, Any]] = None) -> dict:
         """
         生成图像 POST /v1/images/generations
         model: 可用 IMAGE_MODELS 中的别名或完整模型名
         """
+        if use_ip_adapter:
+            result = self._generate_with_ip_adapter(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                ip_adapter=ip_adapter,
+            )
+            if result:
+                return result
+
         model = IMAGE_MODELS.get(model, model) or self.default_image_model
         payload = {"model": model, "prompt": prompt, "n": 1}
         if negative_prompt:
