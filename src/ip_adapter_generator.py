@@ -74,6 +74,16 @@ class IPAdapterGenerator:
         
         print("IP-Adapter pipeline 加载完成!")
         
+    def unload(self):
+        """卸载 pipeline 释放内存"""
+        if self.pipeline is not None:
+            del self.pipeline
+            self.pipeline = None
+            if self.device == "cuda":
+                import torch
+                torch.cuda.empty_cache()
+            print("IP-Adapter pipeline 已卸载")
+        
     def generate_with_reference(
         self,
         prompt: str,
@@ -117,22 +127,25 @@ class IPAdapterGenerator:
             generator = None
         
         # 生成图像
-        images = self.pipeline(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            ip_adapter_image=ref_imgs,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            ip_adapter_scale=ip_adapter_scale,
-        ).images
+        try:
+            images = self.pipeline(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                ip_adapter_image=ref_imgs,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                ip_adapter_scale=ip_adapter_scale,
+            ).images
+        except Exception as e:
+            raise RuntimeError(f"图像生成失败: {e}") from e
         
         return images[0]
     
     def generate_batch(
         self,
         prompts: List[str],
-        reference_images: Union[List[Union[str, Image.Image]], Union[str, Image.Image]],
+        reference_images: Union[List[Union[str, Image.Image]], str, Image.Image],
         **kwargs
     ) -> List[Image.Image]:
         """
