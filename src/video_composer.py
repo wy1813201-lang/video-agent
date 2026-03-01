@@ -131,11 +131,12 @@ class VideoComposer:
 
         # 获取每段时长
         durations = [self._get_duration(p) for p in normalized]
+        has_audio_all = all(self._has_audio(p) for p in normalized)
 
         filter_parts = []
         offset = 0.0
         prev = "[0:v]"
-        prev_a = "[0:a]"
+        prev_a = "[0:a]" if has_audio_all else ""
 
         for i in range(1, len(normalized)):
             td = clips[i].transition_duration if clips[i].transition != TransitionType.NONE else 0
@@ -145,27 +146,29 @@ class VideoComposer:
 
             if clips[i].transition == TransitionType.NONE:
                 filter_parts.append(f"{prev}[{i}:v]concat=n=2:v=1:a=0{vout}")
-                filter_parts.append(f"{prev_a}[{i}:a]concat=n=2:v=0:a=1{aout}")
+                if has_audio_all:
+                    filter_parts.append(f"{prev_a}[{i}:a]concat=n=2:v=0:a=1{aout}")
             else:
                 xfade = clips[i].transition.value if clips[i].transition != TransitionType.DISSOLVE else "dissolve"
                 filter_parts.append(
                     f"{prev}[{i}:v]xfade=transition={xfade}:duration={td}:offset={offset:.3f}{vout}"
                 )
-                filter_parts.append(
-                    f"{prev_a}[{i}:a]acrossfade=d={td}{aout}"
-                )
+                if has_audio_all:
+                    filter_parts.append(
+                        f"{prev_a}[{i}:a]acrossfade=d={td}{aout}"
+                    )
 
             prev = vout
-            prev_a = aout
+            if has_audio_all:
+                prev_a = aout
 
         filter_str = ";".join(filter_parts)
-        cmd = ["ffmpeg", "-y"] + inputs + [
-            "-filter_complex", filter_str,
-            "-map", prev, "-map", prev_a,
-            "-c:v", "libx264", "-preset", "fast",
-            "-c:a", "aac",
-            out
-        ]
+        cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str, "-map", prev]
+        if has_audio_all:
+            cmd += ["-map", prev_a, "-c:a", "aac"]
+        else:
+            cmd += ["-an"]
+        cmd += ["-c:v", "libx264", "-preset", "fast", out]
         self._run(cmd)
         return out
 
@@ -273,6 +276,18 @@ class VideoComposer:
         result = subprocess.run(cmd, capture_output=True, text=True)
         data = json.loads(result.stdout)
         return float(data["format"]["duration"])
+
+    def _has_audio(self, path: str) -> bool:
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_streams", path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        data = json.loads(result.stdout or "{}")
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "audio":
+                return True
+        return False
 
     def _write_srt(self, subtitles: List[SubtitleEntry], path: str):
         def fmt(t: float) -> str:

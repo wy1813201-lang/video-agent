@@ -31,6 +31,26 @@ except ImportError:
     StoryboardManager = None
 
 try:
+    from src.storyboard_flow import StoryboardFlowManager
+except ImportError:
+    StoryboardFlowManager = None
+
+try:
+    from src.cozex_client import CozexClient
+except ImportError:
+    CozexClient = None
+
+try:
+    from src.jimeng_client import JimengVideoClient
+except ImportError:
+    JimengVideoClient = None
+
+try:
+    from src.post_production_director import PostProductionDirector
+except ImportError:
+    PostProductionDirector = None
+
+try:
     from src.asset_manager import AssetManager, AssetType
 except ImportError:
     AssetManager = None
@@ -81,6 +101,7 @@ class ShortDramaAutomator:
         self.config = drama_config
         self.app_config = app_config or {}
         self.episodes_data = []
+        self.series_video_path: Optional[str] = None
 
         os.makedirs(drama_config.output_dir, exist_ok=True)
 
@@ -97,6 +118,7 @@ class ShortDramaAutomator:
             StoryboardManager(storage_cfg.get("storyboards_dir", "output/storyboards"))
             if StoryboardManager else None
         )
+        self.storyboards_dir = storage_cfg.get("storyboards_dir", "output/storyboards")
         self.asset_mgr = (
             AssetManager(storage_cfg.get("dir", "data/storage"))
             if AssetManager else None
@@ -119,6 +141,22 @@ class ShortDramaAutomator:
 
         self._auto_approve = storyboard_cfg.get("auto_approve", False)
         self._scene_duration = storyboard_cfg.get("default_scene_duration", 3.0)
+        self._use_two_step_flow = storyboard_cfg.get("use_two_step_flow", True)
+        self._two_step_use_gemini = storyboard_cfg.get("use_gemini_for_prompts", False)
+        self._auto_generate_media = storyboard_cfg.get("auto_generate_media", False)
+        self._auto_compose_episode = storyboard_cfg.get("auto_compose_episode", False)
+        self._auto_compose_series = storyboard_cfg.get("auto_compose_series", False)
+        self._enable_post_production_director = storyboard_cfg.get("enable_post_production_director", False)
+
+        image_cfg = api_config.get("image", {}).get("cozex", {})
+        video_cfg_api = api_config.get("video", {}).get("jimeng", {})
+        self._cozex_enabled = bool(image_cfg.get("enabled"))
+        self._jimeng_enabled = bool(video_cfg_api.get("enabled"))
+        self.cozex_client = CozexClient() if (self._cozex_enabled and CozexClient) else None
+        self.jimeng_client = JimengVideoClient() if (self._jimeng_enabled and JimengVideoClient) else None
+        self.post_director = PostProductionDirector(self.app_config) if (
+            self._enable_post_production_director and PostProductionDirector
+        ) else None
 
     async def run(self) -> str:
         print(f"\n🎬 AI短剧自动生成器 v2.0")
@@ -126,6 +164,7 @@ class ShortDramaAutomator:
         print("=" * 60)
 
         all_boards = []
+        episode_final_paths: List[str] = []
         try:
             for ep in range(1, self.config.episodes + 1):
                 print(f"\n📝 第 {ep} 集")
@@ -143,6 +182,18 @@ class ShortDramaAutomator:
 
                 # 2. 生成分镜
                 board = None
+                flow = None
+                flow_path = None
+
+                flow_mgr = None
+                if self._use_two_step_flow and StoryboardFlowManager:
+                    flow_mgr = StoryboardFlowManager(script, use_gemini=self._two_step_use_gemini)
+                    flow = flow_mgr.build()
+                    os.makedirs(self.storyboards_dir, exist_ok=True)
+                    flow_path = os.path.join(self.storyboards_dir, f"storyboard_flow_ep{ep:02d}.json")
+                    flow_mgr.save(flow, flow_path)
+                    print(f"   ✓ 两步分镜生成: {len(flow.shots)} 个镜头 → {flow_path}")
+
                 if self.storyboard_mgr:
                     board = self.storyboard_mgr.generate_from_script(
                         script, episode_num=ep, drama_title=self.config.topic
@@ -155,22 +206,61 @@ class ShortDramaAutomator:
                     print(f"   {self.storyboard_mgr.summary(board)}")
 
                 # 3. 生成图片提示词
-                if self.prompt_builder:
+                if flow:
+                    prompts = [s.keyframe_image_prompt for s in flow.shots]
+                    video_prompts = [s.video_prompt for s in flow.shots]
+                    print(f"   ✓ STEP1关键帧提示词: {len(prompts)} 个")
+                    print(f"   ✓ STEP2视频提示词: {len(video_prompts)} 个")
+                    media_result = await self._generate_media_from_flow(flow, episode_num=ep)
+                    if flow_mgr and flow_path:
+                        flow_mgr.save(flow, flow_path)
+                elif self.prompt_builder:
                     prompts = self.prompt_builder.generate_scene_prompts(script)
+                    video_prompts = []
+                    media_result = {"keyframe_paths": [], "video_paths": [], "generated_shots": 0}
                 else:
                     prompts = self._placeholder_prompts(script)
+                    video_prompts = []
+                    media_result = {"keyframe_paths": [], "video_paths": [], "generated_shots": 0}
                 print(f"   ✓ 图片提示词: {len(prompts)} 个")
+                composed_video_path = self._compose_episode_if_needed(
+                    media_result.get("video_paths", []), episode_num=ep
+                )
+                post_prod_result = self._run_post_production_if_needed(
+                    episode_num=ep,
+                    script_text=script,
+                    storyboard_flow_path=flow_path,
+                    clip_paths=media_result.get("video_paths", []),
+                    emotion_tags=self._collect_emotion_tags(flow),
+                )
+                if post_prod_result.get("final_path"):
+                    composed_video_path = post_prod_result["final_path"]
 
                 self.episodes_data.append({
                     "episode_num": ep,
                     "script": script,
                     "image_prompts": prompts,
+                    "video_prompts": video_prompts,
+                    "keyframe_paths": media_result.get("keyframe_paths", []),
+                    "video_paths": media_result.get("video_paths", []),
+                    "generated_shots": media_result.get("generated_shots", 0),
+                    "composed_video_path": composed_video_path,
+                    "timeline_path": post_prod_result.get("timeline_path"),
+                    "voice_plan_path": post_prod_result.get("voice_plan_path"),
+                    "music_plan_path": post_prod_result.get("music_plan_path"),
+                    "voice_track_path": post_prod_result.get("voice_track_path"),
+                    "bgm_track_path": post_prod_result.get("bgm_track_path"),
                     "storyboard_id": board.storyboard_id if board else None,
+                    "storyboard_flow_path": flow_path,
                 })
+                if composed_video_path:
+                    episode_final_paths.append(composed_video_path)
         finally:
             close_fn = getattr(self.script_gen, "close", None) if self.script_gen else None
             if close_fn:
                 await close_fn()
+
+        self.series_video_path = self._compose_series_if_needed(episode_final_paths)
 
         # 4. 保存结果
         output_file = self._save_results()
@@ -183,6 +273,180 @@ class ShortDramaAutomator:
 
         print(f"\n✅ 完成! 共 {len(self.episodes_data)} 集")
         return output_file
+
+    async def _generate_media_from_flow(self, flow, episode_num: int) -> dict:
+        """按两步分镜自动调用 Cozex + Jimeng 生成媒体文件。"""
+        if not self._auto_generate_media:
+            return {"keyframe_paths": [], "video_paths": [], "generated_shots": 0}
+
+        if not flow or not flow.shots:
+            return {"keyframe_paths": [], "video_paths": [], "generated_shots": 0}
+
+        if not self.cozex_client:
+            print("   ⚠️ Cozex 未启用，跳过自动关键帧生成")
+            return {"keyframe_paths": [], "video_paths": [], "generated_shots": 0}
+
+        keyframe_paths = []
+        video_paths = []
+        generated = 0
+        loop = asyncio.get_running_loop()
+
+        print(f"   ▶ 开始生成媒体: Episode {episode_num}")
+        for i, shot in enumerate(flow.shots, 1):
+            print(f"   [STEP1] {i}/{len(flow.shots)} {shot.shot_id}")
+            try:
+                image_result = await loop.run_in_executor(
+                    None,
+                    lambda p=shot.keyframe_image_prompt: self.cozex_client.generate_image(
+                        prompt=p, size="1536x2560"
+                    ),
+                )
+                shot.keyframe_image_path = image_result.get("saved_path")
+                data_items = image_result.get("data") or []
+                if data_items and isinstance(data_items[0], dict):
+                    shot.keyframe_image_url = data_items[0].get("url")
+                if shot.keyframe_image_path:
+                    keyframe_paths.append(shot.keyframe_image_path)
+            except Exception as e:
+                print(f"     ✗ 关键帧失败: {e}")
+                continue
+
+            if not self.jimeng_client:
+                continue
+            if not shot.keyframe_image_url:
+                print("     ⚠️ 无公网图片 URL，跳过 i2v")
+                continue
+
+            print(f"   [STEP2] {i}/{len(flow.shots)} {shot.shot_id}")
+            try:
+                continuity_hint = ""
+                if shot.continuity_state:
+                    continuity_hint = (
+                        f", continuity lock: {shot.continuity_state.get('identity_lock', '')}, "
+                        f"{shot.continuity_state.get('outfit_lock', '')}, "
+                        f"{shot.continuity_state.get('lighting_lock', '')}"
+                    )
+                i2v_prompt = f"{shot.video_prompt}{continuity_hint}"
+                video_result = await self.jimeng_client.image_to_video(
+                    image_url=shot.keyframe_image_url,
+                    prompt=i2v_prompt,
+                    aspect_ratio="9:16",
+                )
+                shot.video_path = video_result.get("video_path")
+                shot.video_task_id = video_result.get("task_id")
+                if shot.video_path:
+                    video_paths.append(shot.video_path)
+                    generated += 1
+            except Exception as e:
+                print(f"     ✗ 视频失败: {e}")
+
+        print(f"   ✓ 媒体生成完成: keyframes={len(keyframe_paths)}, videos={len(video_paths)}")
+        return {
+            "keyframe_paths": keyframe_paths,
+            "video_paths": video_paths,
+            "generated_shots": generated,
+        }
+
+    def _compose_episode_if_needed(self, video_paths: List[str], episode_num: int) -> Optional[str]:
+        """有视频片段时，自动合成单集成片。"""
+        if not self._auto_compose_episode:
+            return None
+        if not self.composer:
+            print("   ⚠️ VideoComposer 不可用，跳过自动合成")
+            return None
+
+        valid = [p for p in video_paths if p and os.path.exists(p)]
+        if not valid:
+            print("   ⚠️ 无有效视频片段，跳过自动合成")
+            return None
+
+        output_path = os.path.join(self.config.output_dir, f"episode_{episode_num:02d}_final.mp4")
+        old_output = self.composer.config.output_path
+        self.composer.config.output_path = output_path
+        try:
+            clips = [VideoClip(path=p) for p in valid]
+            final = self.composer.compose(clips)
+            print(f"   ✓ 单集合成完成: {final}")
+            return final
+        except Exception as e:
+            print(f"   ✗ 单集合成失败: {e}")
+            return None
+        finally:
+            self.composer.config.output_path = old_output
+
+    def _run_post_production_if_needed(
+        self,
+        episode_num: int,
+        script_text: str,
+        storyboard_flow_path: Optional[str],
+        clip_paths: List[str],
+        emotion_tags: Optional[List[str]] = None,
+    ) -> dict:
+        """执行升级版后期导演流程（步骤6）。"""
+        if not self.post_director:
+            return {}
+        if not storyboard_flow_path or not os.path.exists(storyboard_flow_path):
+            print("   ⚠️ 缺少 storyboard.json，跳过 Post-Production Director")
+            return {}
+        if not clip_paths:
+            print("   ⚠️ 无视频片段，跳过 Post-Production Director")
+            return {}
+
+        print("   ▶ STEP6_POST_PRODUCTION_DIRECTOR")
+        try:
+            result = self.post_director.run(
+                episode_num=episode_num,
+                script_text=script_text,
+                storyboard_json_path=storyboard_flow_path,
+                clip_paths=clip_paths,
+                output_dir=self.config.output_dir,
+                emotion_tags=emotion_tags,
+            )
+            final_path = result.get("final_path")
+            if final_path:
+                print(f"   ✓ Post-Production 完成: {final_path}")
+            return result
+        except Exception as e:
+            print(f"   ✗ Post-Production 失败: {e}")
+            return {}
+
+    def _collect_emotion_tags(self, flow) -> List[str]:
+        if not flow or not getattr(flow, "shots", None):
+            return []
+        tags = []
+        for shot in flow.shots:
+            mood = ""
+            if getattr(shot, "continuity_state", None):
+                mood = shot.continuity_state.get("mood_lock", "")
+            tags.append(mood)
+        return tags
+
+    def _compose_series_if_needed(self, episode_video_paths: List[str]) -> Optional[str]:
+        """将每集成片拼接为总成片。"""
+        if not self._auto_compose_series:
+            return None
+        if not self.composer:
+            print("⚠️ VideoComposer 不可用，跳过全集合成")
+            return None
+
+        valid = [p for p in episode_video_paths if p and os.path.exists(p)]
+        if not valid:
+            print("⚠️ 无可用单集成片，跳过全集合成")
+            return None
+
+        output_path = os.path.join(self.config.output_dir, "series_final.mp4")
+        old_output = self.composer.config.output_path
+        self.composer.config.output_path = output_path
+        try:
+            clips = [VideoClip(path=p) for p in valid]
+            final = self.composer.compose(clips)
+            print(f"\n🎞️ 全集成片完成: {final}")
+            return final
+        except Exception as e:
+            print(f"\n✗ 全集合成失败: {e}")
+            return None
+        finally:
+            self.composer.config.output_path = old_output
 
     def compose_video(self, video_paths: List[str], bgm_path: str = None,
                       voiceover_path: str = None) -> Optional[str]:
@@ -239,6 +503,7 @@ class ShortDramaAutomator:
             json.dump({
                 "config": asdict(self.config),
                 "episodes": self.episodes_data,
+                "series_video_path": self.series_video_path,
             }, f, ensure_ascii=False, indent=2)
         return path
 

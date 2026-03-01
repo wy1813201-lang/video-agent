@@ -42,6 +42,7 @@ class ScriptGenerator:
 2. 每个场景包含: 场景描述、对话
 3. 对话要简洁有力，适合短视频节奏
 4. 每集结束时要有悬念或反转
+5. 前三分钟必须有情绪反转，具备极高的商业转化率
 
 请用中文输出。"""
     
@@ -53,6 +54,15 @@ class ScriptGenerator:
         self.client = None
         self.client_type = None
         self.gemini_web_client = None
+        self._market_report = None  # 缓存调研结果，同次运行复用
+
+        # 初始化市场调研器
+        market_cfg = self.api_config.get("market_research", {})
+        try:
+            from .market_researcher import MarketResearcher
+        except ImportError:
+            from market_researcher import MarketResearcher
+        self.market_researcher = MarketResearcher(market_cfg)
 
         gemini_web = self.api_config.get("script", {}).get("gemini_web", {})
         self.gemini_web_config = gemini_web
@@ -76,20 +86,40 @@ class ScriptGenerator:
             self.client = anthropic.Anthropic(api_key=config.anthropic_api_key)
             self.client_type = "anthropic"
     
+    async def _get_market_report(self) -> str:
+        """获取市场调研摘要（同次运行缓存复用）"""
+        if not self.market_researcher.enabled:
+            return ""
+        if self._market_report is None:
+            try:
+                report = await self.market_researcher.research(use_cache=True)
+                self._market_report = self.market_researcher.format_for_prompt(report)
+            except Exception as e:
+                print(f"[ScriptGenerator] 市场调研获取失败: {e}，继续生成")
+                self._market_report = ""
+        return self._market_report
+
     async def generate_episode(
         self, 
         topic: str, 
         episode_num: int, 
         total_episodes: int
     ) -> str:
-        """生成单集剧本"""
-        
+        """生成单集剧本（生成前自动注入市场调研结果）"""
+
+        # 获取市场调研摘要
+        market_context = await self._get_market_report()
+
+        market_section = ""
+        if market_context:
+            market_section = f"\n\n{market_context}\n\n请基于以上市场调研数据，确保剧本题材符合当前热门趋势，前三分钟有情绪反转，具备高商业转化率。\n"
+
         user_prompt = f"""请为以下主题生成第{episode_num}集剧本:
 主题: {topic}
 风格: {self.config.style}
 总集数: {total_episodes}
 每集时长: {self.config.duration_per_episode}秒
-
+{market_section}
 请生成完整的剧本，包含场景描述和对话。每集内容要有变化，不要重复。"""
         
         try:

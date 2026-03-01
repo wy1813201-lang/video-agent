@@ -23,6 +23,15 @@ drama:
 storyboard:
   auto_approve: false         # true = 生成后自动审批所有场景
   default_scene_duration: 3.0 # 每个场景默认时长(秒)
+  use_two_step_flow: true     # true = 启用 FilmDirector 两步分镜流程
+  use_gemini_for_prompts: false # true = 用 Gemini 优化关键帧提示词
+  auto_generate_media: false  # true = 分镜后自动调用 Cozex/Jimeng 生成素材
+  auto_compose_episode: false # true = 每集视频片段生成后自动FFmpeg合成
+  auto_compose_series: false  # true = 所有单集成片自动合成为总片
+  enable_post_production_director: false # true = 启用步骤6升级版后期导演
+
+post_production:
+  bgm_dir: "assets/bgm"       # 音乐素材目录（按情绪关键词匹配文件名）
 
 video:
   transition: "fade"          # none / fade / dissolve / slideleft / slideright / wipe
