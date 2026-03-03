@@ -26,14 +26,22 @@ class StoryboardShot:
     scene_location: str
     shot_type: str
     description: str
-    # STEP 1
-    keyframe_image_prompt: str
+    # STEP 1: image prompt stage
+    character_prompt: str = ""
+    scene_prompt: str = ""
+    composition_prompt: str = ""
+    keyframe_image_prompt: str = ""
     keyframe_image_path: Optional[str] = None   # 生成后填入
     keyframe_image_url: Optional[str] = None
-    # STEP 2
-    video_prompt: str = ""
+    # STEP 2: video strategy stage
+    motion_prompt: str = ""
+    t2v_prompt: str = ""
+    video_prompt: str = ""  # compatibility alias of motion_prompt
     video_path: Optional[str] = None            # 生成后填入
     video_task_id: Optional[str] = None
+    video_method: str = ""                      # i2v / t2v
+    video_quality_score: float = 0.0
+    fallback_reason: str = ""
     continuity_from_shot_id: str = ""
     continuity_state: Dict[str, str] = field(default_factory=dict)
 
@@ -57,13 +65,14 @@ class StoryboardFlowManager:
         mgr.generate_videos(flow, video_fn)       # STEP2: 批量生成视频
     """
 
-    def __init__(self, script: str, use_gemini: bool = False):
+    def __init__(self, script: str, use_gemini: bool = False, visual_style_profile: str = "anime"):
         self.script = script
         self.use_gemini = use_gemini
+        self.visual_style_profile = visual_style_profile
 
     def build(self) -> StoryboardFlow:
         """解析剧本，生成所有分镜及两步 prompt"""
-        agent = FilmDirectorAgent(self.script)
+        agent = FilmDirectorAgent(self.script, visual_style_profile=self.visual_style_profile)
         raw = agent.run(use_gemini=self.use_gemini)
 
         flow = StoryboardFlow(
@@ -78,12 +87,20 @@ class StoryboardFlowManager:
                 scene_location=item["scene_location"],
                 shot_type=item["shot_type"],
                 description=item["description"],
+                character_prompt=item.get("character_prompt", ""),
+                scene_prompt=item.get("scene_prompt", ""),
+                composition_prompt=item.get("composition_prompt", ""),
                 keyframe_image_prompt=item["keyframe_image_prompt"],
                 keyframe_image_path=item.get("keyframe_image_path"),
                 keyframe_image_url=item.get("keyframe_image_url"),
-                video_prompt=item["video_prompt"],
+                motion_prompt=item.get("motion_prompt", item.get("video_prompt", "")),
+                t2v_prompt=item.get("t2v_prompt", ""),
+                video_prompt=item.get("video_prompt", ""),
                 video_path=item.get("video_path"),
                 video_task_id=item.get("video_task_id"),
+                video_method=item.get("video_method", ""),
+                video_quality_score=float(item.get("video_quality_score", 0.0) or 0.0),
+                fallback_reason=item.get("fallback_reason", ""),
                 continuity_from_shot_id=item.get("continuity_from_shot_id", ""),
                 continuity_state=item.get("continuity_state", {}),
             )

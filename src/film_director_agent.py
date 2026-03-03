@@ -92,9 +92,16 @@ class Shot:
     mood: str
     camera_motion: str
     prompt: str
-    # Two-step prompts (populated by compile_prompts_two_step)
-    keyframe_image_prompt: str = ""   # STEP 1: for image generation (CoZex/Jimeng)
-    video_prompt: str = ""            # STEP 2: for video generation (Jimeng i2v)
+    # Step 1: Image prompt components
+    character_prompt: str = ""
+    scene_prompt: str = ""
+    composition_prompt: str = ""
+    keyframe_image_prompt: str = ""   # T2I prompt (CoZex)
+    # Step 2: Video generation prompts
+    motion_prompt: str = ""           # I2V motion prompt
+    t2v_prompt: str = ""              # T2V full prompt
+    # legacy compatibility field
+    video_prompt: str = ""            # alias of motion_prompt
     continuity_from_shot_id: str = ""   # 上一镜头 ID（用于连续性）
     continuity_state: Dict[str, str] = field(default_factory=dict)  # 当前镜头连续性状态
 
@@ -125,10 +132,11 @@ class FilmDirectorAgent:
     # 角色数据库
     characters: Dict[str, Character] = {}
     
-    def __init__(self, script: str):
+    def __init__(self, script: str, visual_style_profile: str = "anime"):
         self.script = script
         self.scenes: List[Scene] = []
         self.director_intent: Optional[DirectorIntent] = None
+        self.visual_style_profile = (visual_style_profile or "anime").lower()
     
     # ------------------------------------------------------------------
     # STEP 1: DIRECTOR INTENT ANALYSIS
@@ -271,13 +279,24 @@ class FilmDirectorAgent:
     # STEP 3: SHOT PLANNING SYSTEM
     # ------------------------------------------------------------------
     def plan_shots(self) -> None:
-        """为每个场景生成电影镜头结构"""
+        """为每个场景生成电影镜头结构 - 生成详细的动作和视觉描述"""
         for scene in self.scenes:
+            # 提取剧本上下文
+            lines = [line.strip() for line in scene.content.split('\n') if line.strip()]
+            action_lines = [line for line in lines if "：" not in line and ":" not in line and not line.startswith("场景") and not line.startswith("梗概")]
+            dialogues = [line for line in lines if "：" in line or ":" in line]
+
+            first_action = action_lines[0] if action_lines else f"展示{scene.location}的环境氛围"
+            last_action = action_lines[-1] if len(action_lines) > 1 else first_action
+            
+            first_dialogue = dialogues[0] if dialogues else "角色间发生肢体互动"
+            second_dialogue = dialogues[1] if len(dialogues) > 1 else "角色陷入沉默或情绪转折"
+
             # 建立镜 (Establishing)
             establishing = Shot(
                 shot_id=f"{scene.scene_id}_EST",
                 shot_type="establishing",
-                description=f"建立场景：{scene.location}",
+                description=f"建立场景：{scene.location}。基于上下文：{first_action}。展示确切的空间关系与氛围。",
                 camera_angle=CameraAngle.WIDE.value,
                 lens_type=LensType.WIDE.value,
                 lighting_style=LightingStyle.NATURAL.value,
@@ -292,7 +311,7 @@ class FilmDirectorAgent:
             medium = Shot(
                 shot_id=f"{scene.scene_id}_MED",
                 shot_type="medium",
-                description="角色对话/动作",
+                description=f"角色互动中景。动作焦点：{first_dialogue}。注重人物肢体语言。",
                 camera_angle=CameraAngle.EYE.value,
                 lens_type=LensType.STANDARD.value,
                 lighting_style=LightingStyle.NATURAL.value,
@@ -307,7 +326,7 @@ class FilmDirectorAgent:
             closeup = Shot(
                 shot_id=f"{scene.scene_id}_CU",
                 shot_type="close-up",
-                description="角色表情/反应",
+                description=f"面部特写。情绪极点：{second_dialogue}。捕捉清晰的微表情变化。",
                 camera_angle=CameraAngle.EYE.value,
                 lens_type=LensType.TELEPHOTO.value,
                 lighting_style=LightingStyle.CHIAROSCURO.value,
@@ -322,7 +341,7 @@ class FilmDirectorAgent:
             detail = Shot(
                 shot_id=f"{scene.scene_id}_DET",
                 shot_type="detail",
-                description="关键物体/道具",
+                description=f"关键细节特写。暗示后续剧情发展的物体或手部动作。剧本线索：{last_action}。",
                 camera_angle=CameraAngle.HIGH.value,
                 lens_type=LensType.MACRO.value,
                 lighting_style=LightingStyle.HIGH_KEY.value,
@@ -337,7 +356,7 @@ class FilmDirectorAgent:
             motion = Shot(
                 shot_id=f"{scene.scene_id}_MOT",
                 shot_type="motion",
-                description="角色移动/场景转换",
+                description=f"动态跟随镜头。场景转换或角色移位：{last_action}。引导视觉流动。",
                 camera_angle=CameraAngle.LOW.value,
                 lens_type=LensType.WIDE.value,
                 lighting_style=LightingStyle.NATURAL.value,
@@ -532,11 +551,48 @@ class FilmDirectorAgent:
             char_desc,
             lighting,
             composition,
+            self._style_suffix(),
             "cinematic quality, photorealistic, 4k, vertical",
         ]
         return ", ".join(p for p in parts if p)
 
-    def _build_video_prompt(self, scene: Scene, shot: Shot, prev_shot: Optional[Shot] = None) -> str:
+    def _build_character_prompt(self, scene: Scene) -> str:
+        base = self._build_character_anchor(scene)
+        detail = (
+            "clean facial anatomy, expressive anime eyes, sharp lineart, "
+            "cel-shaded fabric folds, clear silhouette separation"
+        )
+        return ", ".join([base, detail])
+
+    def _build_scene_prompt(self, scene: Scene, shot: Shot) -> str:
+        return ", ".join([
+            self._infer_space_type(scene.location),
+            scene.location,
+            scene.time_of_day or "daytime",
+            shot.lighting_style or "natural lighting",
+            "layered foreground midground background depth, atmospheric perspective",
+            "environment storytelling props, clean geometry, readable negative space",
+        ])
+
+    def _build_composition_prompt(self, shot: Shot) -> str:
+        comp_map = {
+            "establishing": "nine-grid composition, wide establishing, balanced thirds, strong horizon control, architectural leading lines",
+            "medium": "nine-grid composition, subject on thirds, waist-up, clean headroom, readable over-shoulder space",
+            "close-up": "nine-grid composition, center focus on face, micro-expression emphasis, eye-light catch, shallow depth simulation",
+            "detail": "nine-grid composition, centered detail subject, texture emphasis, macro framing, minimal background noise",
+            "motion": "nine-grid composition, dynamic leading room, directional motion path, parallax-friendly layout",
+        }
+        return comp_map.get(shot.shot_type, "nine-grid composition, cinematic framing")
+
+    def _style_suffix(self) -> str:
+        if self.visual_style_profile == "anime":
+            return (
+                "anime style, 2d cel shading, clean lineart, dynamic key visual, "
+                "high-detail background painting, cinematic anime color script"
+            )
+        return "cinematic style, high detail, coherent visual language"
+
+    def _build_motion_prompt(self, scene: Scene, shot: Shot, prev_shot: Optional[Shot] = None) -> str:
         """
         STEP 2: Video Prompt - 仅负责运动层
         
@@ -586,12 +642,26 @@ class FilmDirectorAgent:
             camera_motion,
             character_motion,
             atmosphere,
+            "pose continuity from first frame, stable character proportions, consistent costume shape language",
             "smooth motion, natural progression, no sudden scene change or style switch, cinematic feel",
+            "anime motion language, controlled smear frames, clean in-between transitions",
         ]
         continuity_clause = self._build_continuity_clause(shot, prev_shot)
         if continuity_clause:
             parts.append(continuity_clause)
         return ", ".join(p for p in parts if p)
+
+    def _build_t2v_prompt(self, scene: Scene, shot: Shot, motion_prompt: str) -> str:
+        """T2V 用完整描述（人物+场景+构图+运动）。"""
+        parts = [
+            shot.character_prompt or self._build_character_prompt(scene),
+            shot.scene_prompt or self._build_scene_prompt(scene, shot),
+            shot.composition_prompt or self._build_composition_prompt(shot),
+            motion_prompt,
+            self._style_suffix(),
+            "cinematic lighting, smooth motion, coherent identity, vertical 9:16, high quality",
+        ]
+        return ", ".join([p for p in parts if p])[:1000]
 
     def _build_continuity_state(self, scene: Scene, shot: Shot) -> Dict[str, str]:
         """构建镜头连续性状态，供下一镜头继承。"""
@@ -685,9 +755,14 @@ class FilmDirectorAgent:
         for scene in self.scenes:
             for shot in scene.shots:
                 shot.continuity_from_shot_id = prev_shot.shot_id if prev_shot else ""
+                shot.character_prompt = self._build_character_prompt(scene)
+                shot.scene_prompt = self._build_scene_prompt(scene, shot)
+                shot.composition_prompt = self._build_composition_prompt(shot)
                 shot.keyframe_image_prompt = self._build_keyframe_image_prompt(scene, shot)
                 shot.continuity_state = self._build_continuity_state(scene, shot)
-                shot.video_prompt = self._build_video_prompt(scene, shot, prev_shot=prev_shot)
+                shot.motion_prompt = self._build_motion_prompt(scene, shot, prev_shot=prev_shot)
+                shot.t2v_prompt = self._build_t2v_prompt(scene, shot, shot.motion_prompt)
+                shot.video_prompt = shot.motion_prompt
                 # Keep legacy prompt = keyframe image prompt
                 shot.prompt = shot.keyframe_image_prompt
                 prev_shot = shot
@@ -793,7 +868,12 @@ class FilmDirectorAgent:
                     "mood": shot.mood,
                     "camera_motion": shot.camera_motion,
                     "prompt": shot.prompt,
+                    "character_prompt": shot.character_prompt,
+                    "scene_prompt": shot.scene_prompt,
+                    "composition_prompt": shot.composition_prompt,
                     "keyframe_image_prompt": shot.keyframe_image_prompt,
+                    "motion_prompt": shot.motion_prompt,
+                    "t2v_prompt": shot.t2v_prompt,
                     "video_prompt": shot.video_prompt,
                     "continuity_from_shot_id": shot.continuity_from_shot_id,
                     "continuity_state": shot.continuity_state,
@@ -839,7 +919,11 @@ class FilmDirectorAgent:
         return self.generate_storyboard()
 
 
-def create_film_storyboard(script: str, use_gemini: bool = True) -> Dict[str, Any]:
+def create_film_storyboard(
+    script: str,
+    use_gemini: bool = True,
+    visual_style_profile: str = "anime",
+) -> Dict[str, Any]:
     """
     便捷函数：将剧本转换为电影级分镜
 
@@ -850,7 +934,7 @@ def create_film_storyboard(script: str, use_gemini: bool = True) -> Dict[str, An
     Returns:
         FILM_STORYBOARD JSON 结构
     """
-    agent = FilmDirectorAgent(script)
+    agent = FilmDirectorAgent(script, visual_style_profile=visual_style_profile)
     return agent.run(use_gemini=use_gemini)
 
 

@@ -8,6 +8,7 @@ import os
 import json
 import asyncio
 import argparse
+import subprocess
 from datetime import datetime
 from typing import Optional, List
 from dataclasses import dataclass, asdict
@@ -34,6 +35,11 @@ try:
     from src.storyboard_flow import StoryboardFlowManager
 except ImportError:
     StoryboardFlowManager = None
+
+try:
+    from src.story_bible import StoryBibleManager
+except ImportError:
+    StoryBibleManager = None
 
 try:
     from src.cozex_client import CozexClient
@@ -109,6 +115,8 @@ class ShortDramaAutomator:
         storage_cfg = self.app_config.get("storage", {})
         video_cfg = self.app_config.get("video", {})
         storyboard_cfg = self.app_config.get("storyboard", {})
+        story_bible_cfg = self.app_config.get("story_bible", {})
+        video_gen_cfg = self.app_config.get("video_generation", {})
 
         # 初始化模块
         self.script_gen = ScriptGenerator(drama_config, api_config) if ScriptGenerator else None
@@ -147,6 +155,12 @@ class ShortDramaAutomator:
         self._auto_compose_episode = storyboard_cfg.get("auto_compose_episode", False)
         self._auto_compose_series = storyboard_cfg.get("auto_compose_series", False)
         self._enable_post_production_director = storyboard_cfg.get("enable_post_production_director", False)
+        self._visual_style_profile = str(storyboard_cfg.get("visual_style_profile", "anime"))
+        self._video_primary_method = str(video_gen_cfg.get("primary_method", "i2v")).lower()
+        self._video_fallback_to_t2v = bool(video_gen_cfg.get("fallback_to_t2v", True))
+        self._video_quality_threshold = float(video_gen_cfg.get("quality_threshold", 0.6))
+        self._story_bible_enabled = bool(story_bible_cfg.get("enabled", True))
+        self._story_bible_path = str(story_bible_cfg.get("path", "data/story_bible.json"))
 
         image_cfg = api_config.get("image", {}).get("cozex", {})
         video_cfg_api = api_config.get("video", {}).get("jimeng", {})
@@ -157,6 +171,19 @@ class ShortDramaAutomator:
         self.post_director = PostProductionDirector(self.app_config) if (
             self._enable_post_production_director and PostProductionDirector
         ) else None
+        self.story_bible = None
+        if self._story_bible_enabled and StoryBibleManager:
+            try:
+                self.story_bible = StoryBibleManager(self._story_bible_path)
+                self.story_bible.set_series_meta(
+                    title=self.config.topic,
+                    total_episodes=self.config.episodes,
+                    genre=self.config.style,
+                )
+                self.story_bible.save()
+            except Exception as e:
+                print(f"⚠️ Story Bible 初始化失败: {e}")
+                self.story_bible = None
 
     async def run(self) -> str:
         print(f"\n🎬 AI短剧自动生成器 v2.0")
@@ -170,15 +197,30 @@ class ShortDramaAutomator:
                 print(f"\n📝 第 {ep} 集")
 
                 # 1. 生成剧本
+                story_context = ""
+                if self.story_bible:
+                    try:
+                        story_context = self.story_bible.build_context_for_episode(ep)
+                    except Exception as e:
+                        print(f"   ⚠️ Story Bible 上下文读取失败: {e}")
+                        story_context = ""
+
                 if self.script_gen:
                     script = await self.script_gen.generate_episode(
                         topic=self.config.topic,
                         episode_num=ep,
-                        total_episodes=self.config.episodes
+                        total_episodes=self.config.episodes,
+                        story_context=story_context,
                     )
                 else:
                     script = self._placeholder_script(ep)
                 print(f"   ✓ 剧本生成完成 ({len(script)} 字)")
+                if self.story_bible:
+                    try:
+                        self.story_bible.update_after_episode(ep, script)
+                        print("   ✓ Story Bible 已更新")
+                    except Exception as e:
+                        print(f"   ⚠️ Story Bible 更新失败: {e}")
 
                 # 2. 生成分镜
                 board = None
@@ -187,7 +229,11 @@ class ShortDramaAutomator:
 
                 flow_mgr = None
                 if self._use_two_step_flow and StoryboardFlowManager:
-                    flow_mgr = StoryboardFlowManager(script, use_gemini=self._two_step_use_gemini)
+                    flow_mgr = StoryboardFlowManager(
+                        script,
+                        use_gemini=self._two_step_use_gemini,
+                        visual_style_profile=self._visual_style_profile,
+                    )
                     flow = flow_mgr.build()
                     os.makedirs(self.storyboards_dir, exist_ok=True)
                     flow_path = os.path.join(self.storyboards_dir, f"storyboard_flow_ep{ep:02d}.json")
@@ -208,9 +254,9 @@ class ShortDramaAutomator:
                 # 3. 生成图片提示词
                 if flow:
                     prompts = [s.keyframe_image_prompt for s in flow.shots]
-                    video_prompts = [s.video_prompt for s in flow.shots]
-                    print(f"   ✓ STEP1关键帧提示词: {len(prompts)} 个")
-                    print(f"   ✓ STEP2视频提示词: {len(video_prompts)} 个")
+                    video_prompts = [getattr(s, "motion_prompt", "") or s.video_prompt for s in flow.shots]
+                    print(f"   ✓ STEP1图片提示词(人物/场景/构图合成): {len(prompts)} 个")
+                    print(f"   ✓ STEP2运动提示词(用于I2V/T2V决策): {len(video_prompts)} 个")
                     media_result = await self._generate_media_from_flow(flow, episode_num=ep)
                     if flow_mgr and flow_path:
                         flow_mgr.save(flow, flow_path)
@@ -313,27 +359,19 @@ class ShortDramaAutomator:
 
             if not self.jimeng_client:
                 continue
-            if not shot.keyframe_image_url:
-                print("     ⚠️ 无公网图片 URL，跳过 i2v")
-                continue
 
             print(f"   [STEP2] {i}/{len(flow.shots)} {shot.shot_id}")
             try:
-                continuity_hint = ""
-                if shot.continuity_state:
-                    continuity_hint = (
-                        f", continuity lock: {shot.continuity_state.get('identity_lock', '')}, "
-                        f"{shot.continuity_state.get('outfit_lock', '')}, "
-                        f"{shot.continuity_state.get('lighting_lock', '')}"
-                    )
-                i2v_prompt = f"{shot.video_prompt}{continuity_hint}"
-                video_result = await self.jimeng_client.image_to_video(
-                    image_url=shot.keyframe_image_url,
-                    prompt=i2v_prompt,
-                    aspect_ratio="9:16",
+                video_result, method_used, fallback_reason = await self._generate_video_for_shot(shot)
+                shot.video_method = method_used
+                shot.fallback_reason = fallback_reason
+                shot.video_path = video_result.get("video_path") if video_result else None
+                shot.video_task_id = video_result.get("task_id") if video_result else None
+                shot.video_quality_score = self._quality_check_video(shot.video_path)
+                print(
+                    f"     ✓ method={shot.video_method} quality={shot.video_quality_score:.2f}"
+                    + (f" fallback={shot.fallback_reason}" if shot.fallback_reason else "")
                 )
-                shot.video_path = video_result.get("video_path")
-                shot.video_task_id = video_result.get("task_id")
                 if shot.video_path:
                     video_paths.append(shot.video_path)
                     generated += 1
@@ -346,6 +384,160 @@ class ShortDramaAutomator:
             "video_paths": video_paths,
             "generated_shots": generated,
         }
+
+    async def _generate_video_for_shot(self, shot):
+        """
+        根据配置选择 i2v/t2v/auto 生成视频，并支持 i2v -> t2v fallback。
+        返回: (result_dict_or_none, method_used, fallback_reason)
+        """
+        method = self._video_primary_method
+        fallback_reason = ""
+
+        continuity_hint = ""
+        if getattr(shot, "continuity_state", None):
+            continuity_hint = (
+                f", continuity lock: {shot.continuity_state.get('identity_lock', '')}, "
+                f"{shot.continuity_state.get('outfit_lock', '')}, "
+                f"{shot.continuity_state.get('lighting_lock', '')}"
+            )
+        motion_prompt = getattr(shot, "motion_prompt", "") or getattr(shot, "video_prompt", "")
+        i2v_prompt = f"{motion_prompt}{continuity_hint}"
+        t2v_prompt = getattr(shot, "t2v_prompt", "") or self._build_t2v_prompt(shot)
+        image_score = self._quality_check_image(getattr(shot, "keyframe_image_path", None))
+
+        if method in ("i2v", "auto") and image_score < self._video_quality_threshold:
+            fallback_reason = f"image_quality_low:{image_score:.2f}"
+            if self._video_fallback_to_t2v:
+                result = await self.jimeng_client.video_generation(
+                    prompt=t2v_prompt,
+                    resolution="720p",
+                    aspect_ratio="9:16",
+                    scene_prompt=t2v_prompt,
+                    enforce_character_consistency=True,
+                )
+                return result, "t2v", fallback_reason
+
+        # primary i2v / auto(i2v first)
+        if method in ("i2v", "auto"):
+            if not getattr(shot, "keyframe_image_url", None):
+                fallback_reason = "missing_keyframe_url"
+            else:
+                try:
+                    result = await self.jimeng_client.image_to_video(
+                        image_url=shot.keyframe_image_url,
+                        prompt=i2v_prompt,
+                        aspect_ratio="9:16",
+                    )
+                    score = self._quality_check_video(result.get("video_path"))
+                    if score >= self._video_quality_threshold:
+                        return result, "i2v", ""
+                    fallback_reason = f"i2v_quality_low:{score:.2f}"
+                except Exception as e:
+                    fallback_reason = f"i2v_error:{e}"
+
+            if self._video_fallback_to_t2v:
+                try:
+                    result = await self.jimeng_client.video_generation(
+                        prompt=t2v_prompt,
+                        resolution="720p",
+                        aspect_ratio="9:16",
+                        scene_prompt=t2v_prompt,
+                        enforce_character_consistency=True,
+                    )
+                    return result, "t2v", fallback_reason or "i2v_failed"
+                except Exception as e:
+                    raise RuntimeError(f"{fallback_reason}; t2v_error:{e}")
+
+            raise RuntimeError(fallback_reason or "i2v_failed_no_fallback")
+
+        # primary t2v
+        if method == "t2v":
+            result = await self.jimeng_client.video_generation(
+                prompt=t2v_prompt,
+                resolution="720p",
+                aspect_ratio="9:16",
+                scene_prompt=t2v_prompt,
+                enforce_character_consistency=True,
+            )
+            return result, "t2v", ""
+
+        raise RuntimeError(f"unsupported primary_method: {method}")
+
+    def _build_t2v_prompt(self, shot) -> str:
+        """构建更适合 T2V 的合成 prompt（避免直接无脑拼接过长文本）。"""
+        parts = [
+            getattr(shot, "keyframe_image_prompt", ""),
+            getattr(shot, "motion_prompt", "") or getattr(shot, "video_prompt", ""),
+            "cinematic lighting, smooth motion, coherent character identity, vertical 9:16, high quality",
+        ]
+        prompt = ", ".join([p for p in parts if p])
+        # 简单长度控制，避免超长 prompt 影响稳定性
+        return prompt[:1000]
+
+    def _quality_check_video(self, video_path: Optional[str]) -> float:
+        """
+        轻量质量评分(0-1):
+        - 存在性/大小
+        - 时长下限
+        - 分辨率下限
+        """
+        if not video_path or not os.path.exists(video_path):
+            return 0.0
+        try:
+            size_bytes = os.path.getsize(video_path)
+            size_score = 0.0 if size_bytes < 100_000 else min(1.0, size_bytes / 2_000_000)
+
+            cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-show_format", video_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout or "{}")
+            duration = float(data.get("format", {}).get("duration", 0) or 0)
+            duration_score = 1.0 if duration >= 2.0 else duration / 2.0
+
+            v_stream = None
+            for s in data.get("streams", []):
+                if s.get("codec_type") == "video":
+                    v_stream = s
+                    break
+            if not v_stream:
+                return 0.0
+            width = int(v_stream.get("width", 0) or 0)
+            height = int(v_stream.get("height", 0) or 0)
+            pixel_score = 1.0 if width * height >= 640 * 360 else (width * height) / float(640 * 360)
+
+            return max(0.0, min(1.0, 0.35 * size_score + 0.35 * duration_score + 0.30 * pixel_score))
+        except Exception:
+            return 0.3
+
+    def _quality_check_image(self, image_path: Optional[str]) -> float:
+        """轻量图像质量评分(0-1)，用于 i2v 前判断是否直接走 t2v。"""
+        if not image_path or not os.path.exists(image_path):
+            return 0.0
+        try:
+            size_bytes = os.path.getsize(image_path)
+            size_score = 0.0 if size_bytes < 80_000 else min(1.0, size_bytes / 1_500_000)
+            # 尝试用 ffprobe 获取分辨率（图片同样可读）
+            cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", image_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout or "{}")
+            v_stream = None
+            for s in data.get("streams", []):
+                if s.get("codec_type") == "video":
+                    v_stream = s
+                    break
+            if not v_stream:
+                return max(0.0, min(1.0, size_score))
+            width = int(v_stream.get("width", 0) or 0)
+            height = int(v_stream.get("height", 0) or 0)
+            pixel_score = 1.0 if width * height >= 1024 * 1024 else (width * height) / float(1024 * 1024)
+            return max(0.0, min(1.0, 0.45 * size_score + 0.55 * pixel_score))
+        except Exception:
+            return 0.4
 
     def _compose_episode_if_needed(self, video_paths: List[str], episode_num: int) -> Optional[str]:
         """有视频片段时，自动合成单集成片。"""

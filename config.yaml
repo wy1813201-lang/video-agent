@@ -1,6 +1,6 @@
 app:
   name: "AI Short Drama Automator"
-  version: "2.0.0"
+  version: "3.0.0"  # SOP 角色优先 + 关键帧驱动版本
   debug: true
 
 output:
@@ -20,22 +20,50 @@ drama:
   duration_per_episode: 60   # 秒
   language: "zh"
 
+# ── SOP 阶段2: 角色母版 ───────────────────────────────────────────────
+character_master:
+  registry_dir: "data/character_masters"   # 角色母版 JSON 存储目录
+  auto_validate: true                      # 注册时自动执行 SOP 校验
+
 storyboard:
   auto_approve: false         # true = 生成后自动审批所有场景
   default_scene_duration: 3.0 # 每个场景默认时长(秒)
+  visual_style_profile: "cinematic" # anime / cinematic
   use_two_step_flow: true     # true = 启用 FilmDirector 两步分镜流程
   use_gemini_for_prompts: false # true = 用 Gemini 优化关键帧提示词
   auto_generate_media: false  # true = 分镜后自动调用 Cozex/Jimeng 生成素材
   auto_compose_episode: false # true = 每集视频片段生成后自动FFmpeg合成
   auto_compose_series: false  # true = 所有单集成片自动合成为总片
-  enable_post_production_director: false # true = 启用步骤6升级版后期导演
+  enable_post_production_director: true # 启用 SOP 后期导演
 
 post_production:
   bgm_dir: "assets/bgm"       # 音乐素材目录（按情绪关键词匹配文件名）
+  color_style: "cinematic"    # SOP 统一调色风格: cinematic / warm / cool / vintage
+  apply_grain: true           # 是否应用胶片颗粒
+  apply_dynamic_blur: false   # 是否应用动态模糊（计算密集）
+
+story_bible:
+  enabled: true
+  path: "data/story_bible.json"
+
+# ── SOP 阶段5: 视频生成（强制 i2v）────────────────────────────────────
+video_generation:
+  primary_method: "i2v"       # 【SOP锁定】只允许 i2v（图生视频），禁止随机生成
+  fallback_to_t2v: false      # 【SOP锁定】禁止 fallback 到 t2v
+  quality_threshold: 0.6      # 0-1, 视频质量阈值
+
+# ── SOP 阶段7: 质量审核 ──────────────────────────────────────────────
+quality_audit:
+  enabled: true
+  character_consistency: 0.90      # 人物一致性最低要求 ≥ 90%
+  max_vague_terms_allowed: 0       # 允许的模糊词数量（0 = 零容忍）
+  prompt_quality_min_length: 80    # prompt 最低字符数
+  min_shots_per_scene: 1
+  max_actions_per_shot: 1
 
 video:
-  transition: "fade"          # none / fade / dissolve / slideleft / slideright / wipe
-  transition_duration: 0.5
+  transition: "dissolve"      # SOP推荐: dissolve（叠化）/ fade（淡入淡出）
+  transition_duration: 0.8    # 略长转场，更自然
   bgm_volume: 0.3
   voiceover_volume: 1.0
 
@@ -47,3 +75,4 @@ ai:
 tts:
   provider: "edge_tts"        # edge_tts / openai
   voice: "zh-CN-XiaoxiaoNeural"
+

@@ -160,6 +160,7 @@ class CozexClient:
         """
         生成图像 POST /v1/images/generations
         model: 可用 IMAGE_MODELS 中的别名或完整模型名
+        size: 图片尺寸，默认 2048x2048（需≥3686400像素）
         """
         if use_ip_adapter:
             result = self._generate_with_ip_adapter(
@@ -171,11 +172,12 @@ class CozexClient:
                 return result
 
         model = IMAGE_MODELS.get(model, model) or self.default_image_model
-        payload = {"model": model, "prompt": prompt, "n": 1}
+        # size 必填，且需要 ≥3686400 像素 (e.g. 2048x2048, 1440x2560)
+        if not size:
+            size = "2048x2048"
+        payload = {"model": model, "prompt": prompt, "size": size}
         if negative_prompt:
             payload["negative_prompt"] = negative_prompt
-        if size:
-            payload["size"] = size  # e.g. "1080x1920"
 
         resp = self.session.post(f"{self.base_url}/v1/images/generations",
                                  json=payload, timeout=120)

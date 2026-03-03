@@ -21,12 +21,14 @@ CONFIG_PATH = Path(__file__).parent.parent / "config" / "api_keys.json"
 
 
 class Stage(Enum):
-    """工作流阶段"""
-    SCRIPT = "剧本生成"
-    IMAGE_PROMPTS = "提示词生成"
-    IMAGE_GEN = "图像生成"
-    VIDEO_GEN = "视频生成"
-    ASSEMBLY = "视频合成"
+    """工作流阶段（SOP 角色优先 + 关键帧驱动版本）"""
+    SCRIPT = "剧本生成"              # 阶段 1
+    CHARACTER_MASTER = "角色母版构建"  # 阶段 2 ★新增
+    STORYBOARD = "分镜拆解"           # 阶段 3
+    KEYFRAME = "关键帧生成"           # 阶段 4 ★新增
+    VIDEO_GEN = "视频生成"            # 阶段 5（强制 i2v）
+    ASSEMBLY = "视频合成"             # 阶段 6
+    QUALITY_AUDIT = "质量审核"        # 阶段 7 ★新增
     COMPLETE = "完成"
 
 
@@ -41,7 +43,7 @@ class QualityResult:
 
 @dataclass
 class WorkflowState:
-    """工作流状态"""
+    """工作流状态（SOP 7阶段）"""
     stage: Stage = Stage.SCRIPT
     progress: float = 0.0
     message: str = ""
@@ -49,12 +51,17 @@ class WorkflowState:
     total_items: int = 0
     completed_items: int = 0
 
-    # 数据
-    script: str = ""
-    prompts: List[str] = field(default_factory=list)
+    # 阶段数据
+    script: str = ""                   # 阶段1: 剧本原文
+    structured_script: dict = field(default_factory=dict)  # 阶段1: 结构化剧本 JSON
+    character_masters: list = field(default_factory=list)  # 阶段2: CharacterMaster 列表
+    storyboard: dict = field(default_factory=dict)         # 阶段3: FILM_STORYBOARD JSON
+    keyframes: Dict[str, str] = field(default_factory=dict)  # 阶段4: {shot_id: image_path}
+    prompts: List[str] = field(default_factory=list)       # 兼容旧字段
     scene_texts: List[str] = field(default_factory=list)
     images: List[str] = field(default_factory=list)
     videos: List[str] = field(default_factory=list)
+    audit_report: Any = None                               # 阶段7: AuditReport
 
     # 用户干预
     user_feedback: str = ""
@@ -63,7 +70,7 @@ class WorkflowState:
 
     # 质量追踪
     quality_results: Dict[str, QualityResult] = field(default_factory=dict)
-    regen_counts: Dict[str, int] = field(default_factory=dict)  # item_key -> 重试次数
+    regen_counts: Dict[str, int] = field(default_factory=dict)
 
 
 class WorkflowManager:
@@ -261,102 +268,143 @@ class WorkflowManager:
     # ------------------------------------------------------------------ #
 
     async def run_workflow(self, config):
-        """运行完整工作流"""
+        """
+        运行完整 SOP 工作流（角色优先 + 关键帧驱动）
 
-        # ===== 阶段 1: 剧本生成 =====
-        await self.update_progress(Stage.SCRIPT, 0.05, "正在生成剧本...", "第1集", 3, 0)
-
+        流水线: 剧本 → 角色母版 → 分镜 → 关键帧 → i2v视频 → 合成 → 质量审核
+        """
+        # ── 阶段 1: 剧本生成 (0-15%) ──────────────────────────────────
+        await self.update_progress(Stage.SCRIPT, 0.03, "[1/7] 正在生成剧本...", "生成中", 1, 0)
         script = await self.generate_script(config)
         self.state.script = script
-
-        # 剧本质量检测
         await self.run_quality_check("script", script, "script_main")
-
-        self.state.completed_items = 3
         self.state.needs_approval = True
-        await self.update_progress(Stage.SCRIPT, 0.15, "剧本生成完成，请审批", "3集已完成", 3, 3)
+        await self.update_progress(Stage.SCRIPT, 0.12, "[1/7] 剧本生成完成，请审批", "等待审批", 1, 1)
         await self.wait_for_approval()
-
-        # 如果用户拒绝并提供反馈，重新生成
         if self.state.user_feedback:
             self.notify(f"📝 根据反馈重新生成剧本: {self.state.user_feedback}")
             script = await self.generate_script(config)
             self.state.script = script
             self.state.user_feedback = ""
 
-        # ===== 阶段 2: 提示词生成 =====
-        await self.update_progress(Stage.IMAGE_PROMPTS, 0.2, "正在生成图像提示词...", "场景1", 12, 0)
-
-        prompts = await self.generate_prompts(script)
-        self.state.prompts = prompts
-        self.state.completed_items = 12
-        await self.update_progress(Stage.IMAGE_PROMPTS, 0.3, "提示词生成完成，请审批", "12个场景", 12, 12)
-
+        # ── 阶段 2: 角色母版构建 (15-25%) ────────────────────────────
+        await self.update_progress(
+            Stage.CHARACTER_MASTER, 0.15,
+            "[2/7] 正在构建角色母版资产...", "分析剧本角色", 1, 0
+        )
+        character_masters = await self.build_character_masters(script, config)
+        self.state.character_masters = character_masters
         self.state.needs_approval = True
+        await self.update_progress(
+            Stage.CHARACTER_MASTER, 0.25,
+            f"[2/7] 角色母版构建完成（{len(character_masters)}个角色），请审批",
+            "等待审批", len(character_masters), len(character_masters)
+        )
         await self.wait_for_approval()
 
-        # ===== 阶段 3: 图像生成（含审批点 + 质量检测 + 重试）=====
-        await self.update_progress(Stage.IMAGE_GEN, 0.35, "正在生成图像...", "场景1/12", 12, 0)
+        # ── 阶段 3: 分镜拆解 (25-40%) ────────────────────────────────
+        await self.update_progress(
+            Stage.STORYBOARD, 0.27,
+            "[3/7] 正在拆解分镜...", "Film Director Agent 工作中", 1, 0
+        )
+        storyboard = await self.generate_storyboard(script, character_masters)
+        self.state.storyboard = storyboard
+        scenes = storyboard.get("scenes", [])
+        total_shots = sum(len(s.get("shots", [])) for s in scenes)
+        await self.update_progress(
+            Stage.STORYBOARD, 0.40,
+            f"[3/7] 分镜完成（{len(scenes)}个场景，{total_shots}个镜头）",
+            "等待审批", total_shots, total_shots
+        )
 
-        images = []
-        for i, prompt in enumerate(prompts):
-            if self.paused:
-                await self.wait_for_approval()
+        # ── 阶段 4: 关键帧生成 (40-65%) ──────────────────────────────
+        await self.update_progress(
+            Stage.KEYFRAME, 0.42,
+            "[4/7] 正在生成关键帧图片...", f"0/{total_shots}", total_shots, 0
+        )
+        keyframes = await self.generate_all_keyframes(storyboard, character_masters)
+        self.state.keyframes = keyframes
+        self.state.images = list(keyframes.values())
 
-            item_key = f"image_{i+1}"
-
-            # 带重试的图像生成
-            img = await self.regenerate_with_retry(
-                item_key, self.generate_image, "image", prompt
-            )
-            images.append(img)
-
-            progress = 0.35 + (i + 1) / len(prompts) * 0.2
+        # 每 4 张审批一次
+        completed = 0
+        for shot_id, img_path in keyframes.items():
+            completed += 1
+            progress = 0.42 + completed / max(total_shots, 1) * 0.22
             await self.update_progress(
-                Stage.IMAGE_GEN, progress,
-                f"已生成 {i+1}/{len(prompts)}",
-                f"场景{i+1}", len(prompts), i + 1,
+                Stage.KEYFRAME, progress,
+                f"[4/7] 关键帧 {completed}/{total_shots}",
+                shot_id, total_shots, completed
             )
-
-            # 每4张图像设置一个审批点
-            if (i + 1) % 4 == 0 and (i + 1) < len(prompts):
-                self.notify(f"📸 已完成 {i+1} 张图像，请审批后继续")
+            if completed % 4 == 0 and completed < total_shots:
+                self.notify(f"📸 已完成 {completed} 张关键帧，请审批后继续")
                 self.state.needs_approval = True
                 await self.wait_for_approval()
 
-        self.state.images = images
+        self.state.needs_approval = True
+        await self.update_progress(
+            Stage.KEYFRAME, 0.65,
+            f"[4/7] 关键帧全部生成完毕（{len(keyframes)}张），请审批",
+            "等待审批", total_shots, total_shots
+        )
+        await self.wait_for_approval()
 
-        # ===== 阶段 4: 视频生成（含质量检测 + 重试）=====
-        await self.update_progress(Stage.VIDEO_GEN, 0.6, "正在生成视频...", "片段1/12", 12, 0)
+        # ── 阶段 5: 视频生成（强制 i2v）(65-88%) ──────────────────────
+        await self.update_progress(
+            Stage.VIDEO_GEN, 0.65,
+            "[5/7] 正在基于关键帧生成视频（i2v模式）...",
+            f"0/{len(keyframes)}", len(keyframes), 0
+        )
+        # 从分镜中预取每个镜头的 motion_prompt
+        video_prompts: Dict[str, str] = {}
+        for _scene in storyboard.get("scenes", []):
+            for _shot in _scene.get("shots", []):
+                _sid = _shot.get("shot_id", "")
+                if _sid:
+                    video_prompts[_sid] = _shot.get(
+                        "motion_prompt", _shot.get("video_prompt", "")
+                    )
 
         videos = []
-        for i, img in enumerate(images):
+        keyframe_items = list(keyframes.items())
+        for i, (shot_id, img_path) in enumerate(keyframe_items):
             if self.paused:
                 await self.wait_for_approval()
-
-            item_key = f"video_{i+1}"
-
+            item_key = f"video_{shot_id}"
+            motion_prompt = video_prompts.get(shot_id, "")
             video = await self.regenerate_with_retry(
-                item_key, self.generate_video, "video", img
+                item_key, self.generate_video, "video", img_path, motion_prompt
             )
             videos.append(video)
-
-            progress = 0.6 + (i + 1) / len(images) * 0.3
+            progress = 0.65 + (i + 1) / len(keyframe_items) * 0.23
             await self.update_progress(
                 Stage.VIDEO_GEN, progress,
-                f"已生成 {i+1}/{len(images)}",
-                f"片段{i+1}", len(images), i + 1,
+                f"[5/7] 视频 {i+1}/{len(keyframe_items)}",
+                shot_id, len(keyframe_items), i + 1
             )
-
         self.state.videos = videos
 
-        # ===== 阶段 5: 视频合成 =====
-        await self.update_progress(Stage.ASSEMBLY, 0.95, "正在合成最终视频...", "合并中", 1, 0)
-
+        # ── 阶段 6: 视频合成 (88-95%) ────────────────────────────────
+        await self.update_progress(
+            Stage.ASSEMBLY, 0.88,
+            "[6/7] 正在合成最终视频（统一调色/转场/音频）...", "合并中", 1, 0
+        )
         final_video = await self.assemble_videos(videos)
 
-        await self.update_progress(Stage.COMPLETE, 1.0, "✅ 全部完成！", final_video, 1, 1)
+        # ── 阶段 7: 质量审核 (95-100%) ───────────────────────────────
+        await self.update_progress(
+            Stage.QUALITY_AUDIT, 0.95,
+            "[7/7] 正在进行质量审核...", "SOP合规检查", 1, 0
+        )
+        audit_report = await self.run_sop_quality_audit(storyboard, character_masters)
+        self.state.audit_report = audit_report
 
+        status_icon = "✅" if audit_report.overall_pass else "⚠️"
+        await self.update_progress(
+            Stage.COMPLETE, 1.0,
+            f"{status_icon} 全部完成！人物一致性: {audit_report.avg_character_consistency:.1%}",
+            final_video, 1, 1
+        )
         return final_video
 
     # ------------------------------------------------------------------ #
@@ -482,9 +530,33 @@ class WorkflowManager:
         self.notify(f"🖼️ 图像已保存: {img_path.name}")
         return str(img_path)
 
-    async def generate_video(self, image_path):
-        """生成视频 - 调用 JimengVideoClient"""
-        from jimeng_client import JimengVideoClient
+    async def generate_video(self, image_path: str, motion_prompt: str = ""):
+        """
+        生成视频 - 强制 i2v（图生视频）模式。
+
+        SOP 规定：视频必须基于关键帧图片生成，禁止随机生成角色。
+        若 image_path 为空或文件不存在，直接抛出 ValueError。
+
+        Args:
+            image_path:    关键帧图片本地路径（必填）
+            motion_prompt: 来自分镜的 motion_prompt（优先使用）；为空时用通用后缀
+        """
+        # ── SOP 强制检查：必须有关键帧图片 ──
+        if not image_path:
+            raise ValueError(
+                "[SOP] generate_video 要求提供 image_path（关键帧图片路径）。"
+                "视频必须基于关键帧生成（i2v模式），禁止随机生成角色。"
+            )
+        if not Path(image_path).exists():
+            raise ValueError(
+                f"[SOP] 关键帧图片不存在: {image_path}。"
+                "请先完成关键帧生成阶段再进行视频生成。"
+            )
+
+        try:
+            from .jimeng_client import JimengVideoClient
+        except ImportError:
+            from jimeng_client import JimengVideoClient
 
         video_cfg = self.api_config.get("video", {}).get("jimeng", {})
         if not video_cfg.get("enabled"):
@@ -493,26 +565,38 @@ class WorkflowManager:
 
         client = JimengVideoClient()
 
-        # 用图像路径对应的提示词（或用通用提示词）
         prompt_suffix = self.api_config.get("prompt", {}).get(
-            "video_quality_suffix", "smooth motion, cinematic, high quality video"
+            "video_quality_suffix",
+            "smooth motion, cinematic high quality, consistent character, i2v"
         )
-        prompt = f"cinematic short drama scene, {prompt_suffix}"
+        # 优先使用分镜的 motion_prompt，否则用通用描述
+        if motion_prompt:
+            prompt = (
+                f"{motion_prompt}, "
+                f"based on the reference image, maintain character appearance exactly as shown, "
+                f"{prompt_suffix}, 9:16 vertical format"
+            )
+        else:
+            prompt = (
+                f"based on the reference image, {prompt_suffix}, "
+                f"maintain character appearance exactly as shown, "
+                f"9:16 vertical format"
+            )
 
         resolution = video_cfg.get("default_resolution", "720p")
-
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
             lambda: client.video_generation(
                 prompt=prompt,
+                image_path=image_path,   # i2v: 传入关键帧图片
                 resolution=resolution,
                 aspect_ratio="9:16",
             ),
         )
 
         video_path = result.get("video_path", "")
-        self.notify(f"🎬 视频已保存: {Path(video_path).name if video_path else '无'}")
+        self.notify(f"🎬 [i2v] 视频已保存: {Path(video_path).name if video_path else '无'}")
         return video_path
 
     async def assemble_videos(self, videos):
@@ -554,3 +638,250 @@ class WorkflowManager:
         else:
             self.notify(f"❌ FFmpeg 合成失败:\n{proc}")
             return ""
+
+    # ------------------------------------------------------------------ #
+    #  SOP 新增 Helper 方法
+    # ------------------------------------------------------------------ #
+
+    async def build_character_masters(self, script: str, config) -> list:
+        """
+        [SOP 阶段2] 从剧本中提取角色并构建 CharacterMaster 对象。
+        
+        并在图像 API 启用时，直接生成角色官方基准图片。
+        """
+        try:
+            from .character_master import CharacterMaster, CharacterMasterRegistry
+            from .character_consistency import CharacterExtractor
+            from .cozex_client import CozexClient
+        except ImportError:
+            from character_master import CharacterMaster, CharacterMasterRegistry
+            from character_consistency import CharacterExtractor
+            from cozex_client import CozexClient
+
+        registry = CharacterMasterRegistry(
+            registry_dir=str(Path("data/character_masters"))
+        )
+        extractor = CharacterExtractor()
+
+        img_cfg = self.api_config.get("image", {}).get("cozex", {})
+        use_image_api = img_cfg.get("enabled", False)
+        client = CozexClient() if use_image_api else None
+
+        masters = []
+        try:
+            characters = extractor.extract_characters(script)
+            for role_key, trait in characters.items():
+                master = CharacterMaster(
+                    character_id=f"char_{role_key}",
+                    name=trait.name,
+                    gender=trait.gender or "unknown",
+                    age_range=trait.age_range or "unknown age",
+                    hair_color="black",
+                    hair_style="natural style",
+                    face_structure=trait.appearance or "natural face structure",
+                    skin_tone="natural skin tone",
+                    eye_description="expressive eyes",
+                    outfit_primary=trait.outfit or "casual outfit",
+                    personality=trait.personality or "",
+                    role_in_story=role_key,
+                    extra_tags=trait.extra_tags,
+                )
+                
+                # 若开启图像 API，生成官方角色资产图片
+                if client:
+                    try:
+                        prompt = f"Character design reference sheet of {master.name}, {master.gender}, {master.age_range}, {master.hair_color} {master.hair_style}, {master.face_structure}, {master.outfit_primary}, photorealistic, full body portrait, clean white background, consistent character design, concept art."
+                        loop = asyncio.get_event_loop()
+                        image_path = await loop.run_in_executor(
+                            None,
+                            lambda m=prompt: client.image_generation(m).get("saved_path", ""),
+                        )
+                        master.reference_image_path = image_path
+                        self.notify(f"🖼️ 角色图片生成成功: {master.name}")
+                    except Exception as e:
+                        self.notify(f"⚠️ 角色 {master.name} 图片生成失败: {e}")
+
+                try:
+                    registry.register(master)
+                    masters.append(master)
+                    self.notify(f"👤 角色母版已注册: {master.name}")
+                except ValueError as ve:
+                    self.notify(f"⚠️ 角色 {master.name} 母版注册失败（SOP校验）: {ve}")
+                    masters.append(master)
+
+        except Exception as e:
+            self.notify(f"⚠️ 角色提取失败: {e}，使用示例角色母版")
+            masters.append(CharacterMaster.example())
+
+        if not masters:
+            masters.append(CharacterMaster.example())
+
+        return masters
+
+    @staticmethod
+    def _flat_to_nested_storyboard(flat: dict) -> dict:
+        """
+        将 FilmDirectorAgent.run() 的 film_storyboard 平铺格式
+        转换为 scenes 嵌套格式，供 QualityAuditor / generate_all_keyframes 使用。
+
+        输入：{"film_storyboard": [{scene_id, shot_id, ...}, ...], ...}
+        输出：{"scenes": [{"scene_id": ..., "shots": [...]}], ...}
+        """
+        scenes_ordered: dict = {}
+        for shot in flat.get("film_storyboard", []):
+            scene_id = shot.get("scene_id", "Scene_01")
+            if scene_id not in scenes_ordered:
+                scenes_ordered[scene_id] = {
+                    "scene_id": scene_id,
+                    "location": shot.get("scene_location", ""),
+                    "time_of_day": shot.get("scene_time", ""),
+                    "emotional_tone": shot.get("scene_emotion", ""),
+                    "shots": [],
+                }
+            scenes_ordered[scene_id]["shots"].append(shot)
+        return {
+            "director_intent": flat.get("director_intent", {}),
+            "characters": flat.get("characters", {}),
+            "scenes": list(scenes_ordered.values()),
+        }
+
+    async def generate_storyboard(self, script: str, character_masters: list) -> dict:
+        """
+        [SOP 阶段3] 调用 FilmDirectorAgent 生成电影级分镜。
+        返回 scenes 嵌套格式（供 QualityAuditor / generate_all_keyframes 统一使用）。
+        """
+        try:
+            from .film_director_agent import FilmDirectorAgent
+        except ImportError:
+            from film_director_agent import FilmDirectorAgent
+
+        visual_style = self.api_config.get("storyboard", {}).get(
+            "visual_style_profile", "cinematic"
+        )
+        loop = asyncio.get_event_loop()
+        agent = FilmDirectorAgent(script, visual_style)
+        # 注入角色母版 ID，确保分镜与角色资产关联
+        agent.character_master_ids = [m.character_id for m in character_masters]
+
+        # 运行完整导演流程（意图分析→分镜→镜头规划→视觉增强→角色→运镜→Prompt编译→输出）
+        flat_storyboard = await loop.run_in_executor(
+            None, lambda: agent.run(use_gemini=False)
+        )
+        # 转换为 scenes 嵌套格式
+        storyboard = self._flat_to_nested_storyboard(flat_storyboard)
+
+        # 保存分镜 JSON
+        out_path = Path("output/storyboard_latest.json")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            import json as _json
+            _json.dump(storyboard, f, ensure_ascii=False, indent=2)
+        self.notify(f"🎬 分镜已保存: {out_path}")
+        return storyboard
+
+    async def generate_all_keyframes(
+        self, storyboard: dict, character_masters: list
+    ) -> Dict[str, str]:
+        """
+        [SOP 阶段4] 为所有分镜生成关键帧图片（调用 KeyframeGenerator + CozexClient）。
+
+        Returns:
+            {shot_id: image_path}
+        """
+        try:
+            from .keyframe_generator import KeyframeGenerator
+            from .cozex_client import CozexClient
+        except ImportError:
+            from keyframe_generator import KeyframeGenerator
+            from cozex_client import CozexClient
+
+        img_cfg = self.api_config.get("image", {}).get("cozex", {})
+        if not img_cfg.get("enabled"):
+            self.notify("⚠️ 图像 API 未启用，关键帧生成跳过，使用空路径占位")
+            # 返回占位字典（shot_id -> ""）
+            placeholder = {}
+            for scene in storyboard.get("scenes", []):
+                for shot in scene.get("shots", []):
+                    placeholder[shot.get("shot_id", f"s_{len(placeholder)}")] = ""
+            return placeholder
+
+        client = CozexClient()
+        generator = KeyframeGenerator(output_dir="output/keyframes")
+        results: Dict[str, str] = {}
+
+        for scene in storyboard.get("scenes", []):
+            for shot in scene.get("shots", []):
+                shot_id = shot.get("shot_id", "unknown")
+                # 确定该分镜出场的角色母版
+                shot_char_ids = shot.get("characters_in_shot", [])
+                if shot_char_ids:
+                    shot_masters = [
+                        m for m in character_masters
+                        if m.character_id in shot_char_ids or m.name in shot_char_ids
+                    ]
+                else:
+                    shot_masters = character_masters  # 默认使用所有角色
+
+                if not shot_masters:
+                    shot_masters = character_masters
+
+                try:
+                    # 构建九宫格关键帧规格 (9-panel narrative storyboard)
+                    spec = generator.build_nine_grid_prompt(shot, shot_masters)
+                    # 异步生成图片
+                    loop = asyncio.get_event_loop()
+                    image_path = await loop.run_in_executor(
+                        None,
+                        lambda s=spec: client.image_generation(s.compiled_prompt).get(
+                            "saved_path", ""
+                        ),
+                    )
+                    spec.image_path = image_path
+                    results[shot_id] = image_path
+                    self.notify(f"🖼️ 关键帧 [{shot_id}] → {Path(image_path).name if image_path else '失败'}")
+                except Exception as e:
+                    self.notify(f"⚠️ 关键帧 [{shot_id}] 生成失败: {e}")
+                    results[shot_id] = ""
+
+        # 将关键帧路径注入分镜 JSON 并保存
+        try:
+            generator.save_storyboard_with_keyframes(
+                storyboard, results, "output/storyboard_with_keyframes.json"
+            )
+        except Exception:
+            pass
+
+        return results
+
+    async def run_sop_quality_audit(
+        self, storyboard: dict, character_masters: list
+    ):
+        """
+        [SOP 阶段7] 对整个分镜执行质量审核并保存报告。
+        """
+        try:
+            from .quality_auditor import QualityAuditor
+        except ImportError:
+            from quality_auditor import QualityAuditor
+
+        audit_thresholds = self.api_config.get("quality_audit", {})
+        auditor = QualityAuditor(thresholds=audit_thresholds or None)
+
+        loop = asyncio.get_event_loop()
+        report = await loop.run_in_executor(
+            None,
+            lambda: auditor.audit_storyboard(
+                storyboard, character_masters, episode="current"
+            ),
+        )
+
+        # 保存报告
+        report_path = "output/quality_audit_report.json"
+        await loop.run_in_executor(
+            None, lambda: auditor.save_report(report, report_path)
+        )
+        self.notify(
+            f"📋 质量审核完成: 通过率 {report.passed_shots}/{report.total_shots}，"
+            f"人物一致性: {report.avg_character_consistency:.1%}"
+        )
+        return report

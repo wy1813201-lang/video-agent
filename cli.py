@@ -1,202 +1,215 @@
 #!/usr/bin/env python3
 """
-视频生成工作流 CLI
-支持实时监控和用户干预
+AI 短剧自动生成工作流 CLI
+SOP 版本：角色优先 + 关键帧驱动
+
+用法:
+  python cli.py                          # 完整 7 阶段 SOP 流程
+  python cli.py --step script            # 仅生成剧本
+  python cli.py --step character         # 仅构建角色母版
+  python cli.py --step storyboard        # 仅生成分镜
+  python cli.py --step keyframe          # 仅生成关键帧
+  python cli.py --step video             # 仅生成视频（需先有关键帧）
+  python cli.py --step assemble          # 仅合成视频
+  python cli.py --step audit             # 仅运行质量审核
+  python cli.py -c my_char.json          # 加载已有角色母版，跳过角色构建
 """
 
+import argparse
 import asyncio
 import json
 import os
 import sys
-from datetime import datetime
+from pathlib import Path
 
 # 添加 src 到路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from workflow_manager import WorkflowManager, Stage
-from feishu_notifier import FeishuNotifier
-from src.script_generator import ScriptGenerator
+from src.workflow_manager import WorkflowManager, Stage
 
-# 飞书配置
-FEISHU_USER_ID = "ou_f6704c00c53276b4ac879bc66056981a"
 
-class InteractiveWorkflow:
-    """交互式工作流"""
-    
-    def __init__(self):
-        self.manager = WorkflowManager(notify_callback=self.on_update)
-        self.notifier = FeishuNotifier(user_id=FEISHU_USER_ID)
-        self.script_gen = None
-        self.config = None
-    
-    def on_update(self, message: str):
-        """收到进度更新"""
-        print(f"\n{'='*50}")
-        print(message)
-        print('='*50)
-        
-        # 发送到飞书
+def build_config(api_config: dict, topic: str, style: str, episodes: int):
+    """构建工作流配置对象"""
+    return type("Config", (), {
+        "topic": topic,
+        "style": style,
+        "episodes": episodes,
+        "duration_per_episode": 60,
+        "openai_api_key": (
+            api_config.get("script", {}).get("openai", {}).get("api_key")
+        ),
+        "anthropic_api_key": (
+            api_config.get("script", {}).get("custom_opus", {}).get("api_key")
+        ),
+    })()
+
+
+def load_api_config() -> dict:
+    config_path = Path(__file__).parent / "config" / "api_keys.json"
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            return json.load(f)
+    print("⚠️  config/api_keys.json 不存在，使用空配置")
+    return {}
+
+
+def notify(msg: str):
+    print(f"\n{'='*55}\n{msg}\n{'='*55}")
+
+
+async def run_step_script(manager: WorkflowManager, config):
+    """阶段 1: 仅生成剧本"""
+    notify("[1/7] 正在生成剧本...")
+    script = await manager.generate_script(config)
+    manager.state.script = script
+    print("\n📝 剧本生成完成（前 500 字）：")
+    print(script[:500] + "..." if len(script) > 500 else script)
+    return script
+
+
+async def run_step_character(manager: WorkflowManager, config, character_file: str = ""):
+    """阶段 2: 构建角色母版（或从文件加载）"""
+    if character_file and Path(character_file).exists():
+        notify(f"[2/7] 加载已有角色母版: {character_file}")
+        from src.character_master import CharacterMaster
+        master = CharacterMaster.load_from_json(character_file)
+        manager.state.character_masters = [master]
+        print(f"✅ 角色母版已加载: {master.name}")
+    else:
+        notify("[2/7] 正在构建角色母版...")
+        script = manager.state.script or await run_step_script(manager, config)
+        masters = await manager.build_character_masters(script, config)
+        manager.state.character_masters = masters
+        for m in masters:
+            print(f"  👤 {m.name} ({m.character_id}) — {m.to_anchor_fragment()[:80]}...")
+    return manager.state.character_masters
+
+
+async def run_step_storyboard(manager: WorkflowManager, config):
+    """阶段 3: 生成分镜"""
+    notify("[3/7] 正在生成分镜（Film Director Agent）...")
+    if not manager.state.script:
+        await run_step_script(manager, config)
+    if not manager.state.character_masters:
+        await run_step_character(manager, config)
+    storyboard = await manager.generate_storyboard(
+        manager.state.script, manager.state.character_masters
+    )
+    manager.state.storyboard = storyboard
+    scenes = storyboard.get("scenes", [])
+    shots = sum(len(s.get("shots", [])) for s in scenes)
+    print(f"✅ 分镜完成: {len(scenes)} 个场景，{shots} 个镜头")
+    return storyboard
+
+
+async def run_step_keyframe(manager: WorkflowManager, config):
+    """阶段 4: 生成关键帧"""
+    notify("[4/7] 正在生成关键帧...")
+    if not manager.state.storyboard:
+        await run_step_storyboard(manager, config)
+    keyframes = await manager.generate_all_keyframes(
+        manager.state.storyboard, manager.state.character_masters
+    )
+    manager.state.keyframes = keyframes
+    manager.state.images = list(keyframes.values())
+    ok = sum(1 for v in keyframes.values() if v)
+    print(f"✅ 关键帧生成完成: {ok}/{len(keyframes)} 张成功")
+    return keyframes
+
+
+async def run_step_video(manager: WorkflowManager):
+    """阶段 5: 基于关键帧生成视频（i2v 模式）"""
+    notify("[5/7] 正在基于关键帧生成视频（i2v）...")
+    if not manager.state.keyframes:
+        print("❌ 请先运行 --step keyframe")
+        return []
+    videos = []
+    for shot_id, img_path in manager.state.keyframes.items():
         try:
-            self.notifier.send_text(message, FEISHU_USER_ID)
+            video = await manager.generate_video(img_path)
+            videos.append(video)
+            print(f"  🎬 [{shot_id}] → {Path(video).name if video else '空'}")
+        except ValueError as e:
+            print(f"  ⛔ [{shot_id}] i2v 强制检查失败: {e}")
         except Exception as e:
-            print(f"飞书通知失败: {e}")
-    
-    async def start(self, topic: str = "重生千金复仇记"):
-        """开始工作流"""
-        
-        print(f"\n🚀 启动视频生成工作流")
-        print(f"📺 主题: {topic}")
-        
-        # 加载配置
-        config_path = os.path.join(os.path.dirname(__file__), "config", "api_keys.json")
-        api_config = {}
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                api_config = json.load(f)
-        
-        # 创建剧本生成器
-        self.config = type('Config', (), {
-            'topic': topic,
-            'style': '情感',
-            'episodes': 3,
-            'duration_per_episode': 60,
-            'openai_api_key': None,
-            'anthropic_api_key': api_config.get('script', {}).get('custom_opus', {}).get('api_key')
-        })()
-        
-        self.script_gen = ScriptGenerator(self.config, api_config)
-        
-        # ========== 阶段 1: 剧本 ==========
-        await self.manager.update_progress(
-            Stage.SCRIPT, 0.05,
-            "正在生成剧本...",
-            "第1集", 3, 0
-        )
-        
-        print("\n📝 生成剧本中...")
-        episodes = []
-        for i in range(1, 4):
-            script = await self.script_gen.generate_episode(topic, i, 3)
-            episodes.append(script)
-            await self.manager.update_progress(
-                Stage.SCRIPT, 0.05 + i*0.03,
-                f"第{i}集已完成",
-                f"第{i}集", 3, i
-            )
-        
-        self.manager.state.script = "\n\n---\n\n".join(episodes)
-        self.manager.state.needs_approval = True
-        
-        await self.manager.update_progress(
-            Stage.SCRIPT, 0.15,
-            "✅ 剧本生成完成，等待审批",
-            "3集已完成", 3, 3
-        )
-        
-        # 打印剧本供确认
-        print("\n" + "="*50)
-        print("生成的剧本:")
-        print("="*50)
-        for i, ep in enumerate(episodes, 1):
-            print(f"\n--- 第{i}集 ---")
-            print(ep[:500] + "..." if len(ep) > 500 else ep)
-        
-        # 等待用户输入
-        print("\n" + "="*50)
-        print("请确认剧本: ")
-        print("  [y] 批准继续")
-        print("  [n] 重新生成")
-        print("  [q] 退出")
-        print("="*50)
-        
-        # 发送飞书消息等待确认
-        self.notifier.send_text(
-            f"📝 **剧本已生成**\n\n"
-            f"主题: {topic}\n"
-            f"集数: 3集\n\n"
-            f"请回复:\n"
-            f"  - `y` 批准继续\n"
-            f"  - `n` 重新生成\n"
-            f"  - `q` 退出",
-            FEISHU_USER_ID
-        )
-        
-        # 这里暂停等待用户输入
-        user_input = input("\n输入指令 [y/n/q]: ").strip().lower()
-        
-        if user_input == 'q':
-            print("❌ 已退出")
-            return
-        elif user_input == 'n':
-            print("🔄 重新生成...")
-            self.manager.state.needs_approval = True
-            await self.start(topic)
-            return
-        
-        # 批准继续
-        self.manager.approve()
-        
-        # ========== 阶段 2: 提示词 ==========
-        await self.manager.update_progress(
-            Stage.IMAGE_PROMPTS, 0.2,
-            "正在生成图像提示词...",
-            "处理中", 12, 0
-        )
-        
-        # 生成提示词
-        prompts = []
-        for i, ep in enumerate(episodes, 1):
-            # 简单提取场景
-            scenes = ep.split("场景")
-            for j, scene in enumerate(scenes[1:], 1):
-                prompt = f"cinematic scene, {scene[:100]}, high quality, 8k, detailed"
-                prompts.append(prompt)
-                await self.manager.update_progress(
-                    Stage.IMAGE_PROMPTS, 0.2 + len(prompts)/12 * 0.1,
-                    f"已生成 {len(prompts)} 个提示词",
-                    f"场景{len(prompts)}", 12, len(prompts)
-                )
-        
-        self.manager.state.prompts = prompts
-        
-        # 打印提示词
-        print("\n" + "="*50)
-        print("生成的图像提示词:")
-        print("="*50)
-        for i, p in enumerate(prompts[:6], 1):
-            print(f"{i}. {p[:80]}...")
-        
-        await self.manager.update_progress(
-            Stage.IMAGE_PROMPTS, 0.3,
-            "✅ 提示词生成完成",
-            f"{len(prompts)}个场景", 12, 12
-        )
-        
-        print("\n⚠️  后续阶段需要视频生成 API")
-        print("当前支持的 API:")
-        print("  - 可灵 AI (app.klingai.com)")
-        print("  - 即梦 AI (jimeng.jianying.com)")
-        
-        self.notifier.send_text(
-            "📊 **工作流暂停**\n\n"
-            "✅ 剧本生成完成\n"
-            "✅ 图像提示词生成完成\n\n"
-            "⏸️ 等待视频生成 API...\n"
-            "获取后可灵/即梦 API 后可继续",
-            FEISHU_USER_ID
-        )
-        
-        return self.manager.state
+            print(f"  ⚠️ [{shot_id}] 视频生成失败: {e}")
+    manager.state.videos = videos
+    return videos
+
+
+async def run_step_assemble(manager: WorkflowManager):
+    """阶段 6: 合成视频"""
+    notify("[6/7] 正在合成最终视频...")
+    final = await manager.assemble_videos(manager.state.videos)
+    print(f"✅ 最终视频: {final}")
+    return final
+
+
+async def run_step_audit(manager: WorkflowManager):
+    """阶段 7: 质量审核"""
+    notify("[7/7] 正在进行质量审核...")
+    if not manager.state.storyboard:
+        print("⚠️  无分镜数据，跳过审核")
+        return None
+    report = await manager.run_sop_quality_audit(
+        manager.state.storyboard, manager.state.character_masters
+    )
+    print(report.summary_text())
+    return report
 
 
 async def main():
-    workflow = InteractiveWorkflow()
-    
-    topic = "重生千金复仇记"
-    if len(sys.argv) > 1:
-        topic = sys.argv[1]
-    
-    await workflow.start(topic)
+    parser = argparse.ArgumentParser(
+        description="AI 短剧 SOP 工作流 CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--step", "-s",
+        choices=["all", "script", "character", "storyboard", "keyframe", "video", "assemble", "audit"],
+        default="all",
+        help="执行指定阶段（默认: all — 全流程）",
+    )
+    parser.add_argument("--topic", "-t", default="重生千金复仇记", help="剧本主题")
+    parser.add_argument("--style", default="情感", help="剧本风格")
+    parser.add_argument("--episodes", "-e", type=int, default=3, help="集数")
+    parser.add_argument(
+        "--character-file", "-c",
+        default="",
+        help="已有角色母版 JSON 路径（跳过角色构建阶段）",
+    )
+    args = parser.parse_args()
+
+    api_config = load_api_config()
+    config = build_config(api_config, args.topic, args.style, args.episodes)
+    manager = WorkflowManager(notify_callback=notify)
+
+    notify(f"🚀 AI 短剧 SOP 工作流  |  主题: {args.topic}  |  模式: {args.step}")
+
+    if args.step == "all":
+        final = await manager.run_workflow(config)
+        notify(f"🎉 完成！最终视频: {final}")
+
+    elif args.step == "script":
+        await run_step_script(manager, config)
+
+    elif args.step == "character":
+        await run_step_character(manager, config, args.character_file)
+
+    elif args.step == "storyboard":
+        await run_step_storyboard(manager, config)
+
+    elif args.step == "keyframe":
+        await run_step_keyframe(manager, config)
+
+    elif args.step == "video":
+        await run_step_video(manager)
+
+    elif args.step == "assemble":
+        await run_step_assemble(manager)
+
+    elif args.step == "audit":
+        await run_step_audit(manager)
 
 
 if __name__ == "__main__":

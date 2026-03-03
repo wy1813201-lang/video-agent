@@ -29,22 +29,48 @@ except ImportError:
 class ScriptGenerator:
     """AI剧本生成器"""
     
-    SYSTEM_PROMPT = """你是一个专业的小说家和剧本作家。
+    SYSTEM_PROMPT = """你是一个专业的小说家和剧本作家，精通AI短剧工业化制作流程。
 你擅长创作吸引人的短剧剧本，特别是:
 - 情感剧: 爱情、家庭、复仇
 - 悬疑剧: 推理、探案、惊悚
 - 搞笑剧: 喜剧、段子
 - 科幻剧: 未来、科幻
 
-请生成适合AI视频生成的短剧剧本。
-剧本格式:
-1. 每集3-5个场景
-2. 每个场景包含: 场景描述、对话
-3. 对话要简洁有力，适合短视频节奏
-4. 每集结束时要有悬念或反转
-5. 前三分钟必须有情绪反转，具备极高的商业转化率
+【SOP输出规范】
+请严格按以下结构输出完整剧本（JSON格式包裹在```json ... ```中）：
 
-请用中文输出。"""
+{
+  "title": "剧名",
+  "episode": 集数,
+  "style": "风格",
+  "summary": "本集一句话概括",
+  "character_count": 主要角色数量,
+  "conflict_structure": "核心冲突描述（一句话）",
+  "emotion_nodes": ["情绪节点1", "情绪节点2", "情绪节点3"],
+  "scenes": [
+    {
+      "scene_id": "s1",
+      "location": "具体地点（室内/室外+空间名）",
+      "time_of_day": "时间段",
+      "characters": ["角色A", "角色B"],
+      "emotion": "主情绪",
+      "action_summary": "核心动作（单一、明确、可执行）",
+      "description": "场景描述（含空间结构、远近层次）",
+      "dialogues": [
+        {"speaker": "角色A", "line": "台词"}
+      ]
+    }
+  ]
+}
+
+要求：
+1. 每集3-5个场景
+2. 每个场景的 action_summary 必须单一明确，禁止"同时做多件事"
+3. 情绪变化节点至少3个，节奏要有起伏
+4. 前三分钟必须有情绪反转，具备极高的商业转化率
+5. 每个场景时长控制在10-20秒可拍摄范围内
+
+请用中文输出，JSON结构严格正确。"""
     
     def __init__(self, config, api_config=None):
         self.config = config
@@ -103,7 +129,8 @@ class ScriptGenerator:
         self, 
         topic: str, 
         episode_num: int, 
-        total_episodes: int
+        total_episodes: int,
+        story_context: str = "",
     ) -> str:
         """生成单集剧本（生成前自动注入市场调研结果）"""
 
@@ -114,12 +141,17 @@ class ScriptGenerator:
         if market_context:
             market_section = f"\n\n{market_context}\n\n请基于以上市场调研数据，确保剧本题材符合当前热门趋势，前三分钟有情绪反转，具备高商业转化率。\n"
 
+        story_section = ""
+        if story_context:
+            story_section = f"\n\n【连载上下文（Story Bible）】\n{story_context}\n"
+
         user_prompt = f"""请为以下主题生成第{episode_num}集剧本:
 主题: {topic}
 风格: {self.config.style}
 总集数: {total_episodes}
 每集时长: {self.config.duration_per_episode}秒
 {market_section}
+{story_section}
 请生成完整的剧本，包含场景描述和对话。每集内容要有变化，不要重复。"""
         
         try:
@@ -206,7 +238,11 @@ class ScriptGenerator:
             f"请重点生成第{episode_num}/{total_episodes}集，主题是“{topic}”。\n"
             f"{prompt}"
         )
-        script_json = await self.gemini_web_client.generate_script(provider_prompt)
+        # GeminiWebClient 既兼容同步，也提供 async 包装
+        if hasattr(self.gemini_web_client, "generate_script_async"):
+            script_json = await self.gemini_web_client.generate_script_async(provider_prompt)
+        else:
+            script_json = self.gemini_web_client.generate_script(provider_prompt)
         return self._script_json_to_text(script_json, episode_num)
 
     async def close(self):
@@ -239,7 +275,38 @@ class ScriptGenerator:
             lines.append("")
 
         return "\n".join(lines).strip()
-    
+
+    def parse_structured_script(self, raw_text: str) -> Optional[Dict[str, Any]]:
+        """
+        从 LLM 原始输出中提取结构化剧本 JSON。
+
+        SOP 规范输出包含：
+          - character_count, conflict_structure, emotion_nodes
+          - scenes[]: scene_id, location, time_of_day, characters,
+                      emotion, action_summary, description, dialogues
+
+        Returns:
+            结构化剧本 dict，或 None（解析失败时）
+        """
+        import re as _re
+        # 尝试提取 ```json ... ``` 块
+        match = _re.search(r"```json\s*(.*?)```", raw_text, _re.DOTALL | _re.IGNORECASE)
+        if match:
+            json_str = match.group(1).strip()
+        else:
+            # fallback：尝试将整段文本当 JSON 解析
+            json_str = raw_text.strip()
+        try:
+            import json as _json
+            data = _json.loads(json_str)
+            # 校验 SOP 必要字段
+            if "scenes" not in data:
+                return None
+            return data
+        except Exception:
+            return None
+
+
     def _generate_fallback(self, topic: str, episode_num: int) -> str:
         """生成示例剧本"""
         templates = {

@@ -463,3 +463,178 @@ class PostProductionDirector:
     def _save_json(self, path: str, data: Any) -> None:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------ #
+    #  SOP 后期增强方法（统一调色 / 锐度颗粒 / 动态模糊）
+    # ------------------------------------------------------------------ #
+
+    def apply_unified_color_grade(
+        self,
+        input_video: str,
+        output_video: str,
+        style: str = "cinematic",
+    ) -> bool:
+        """
+        [SOP 阶段6] 统一调色 —— 确保全集色调风格一致。
+
+        预设：
+        - cinematic: 低饱和、轻微蓝绿偏移、略微提亮高光
+        - warm:      暖橙色调，适合情感剧
+        - cool:      冷蓝绿，适合悬疑/科幻
+        - vintage:   复古低对比，胶片感
+        """
+        if not os.path.exists(input_video):
+            return False
+
+        PRESETS = {
+            "cinematic": (
+                "eq=brightness=0.03:contrast=1.08:saturation=0.82,"
+                "colorbalance=rs=-0.05:gs=0.02:bs=0.08"
+            ),
+            "warm": (
+                "eq=brightness=0.02:contrast=1.05:saturation=1.10,"
+                "colorbalance=rs=0.12:gs=0.02:bs=-0.08"
+            ),
+            "cool": (
+                "eq=brightness=0.0:contrast=1.10:saturation=0.85,"
+                "colorbalance=rs=-0.08:gs=0.01:bs=0.12"
+            ),
+            "vintage": (
+                "eq=brightness=0.0:contrast=0.92:saturation=0.70:gamma=1.08,"
+                "curves=preset=vintage"
+            ),
+        }
+        vf = PRESETS.get(style, PRESETS["cinematic"])
+        cmd = [
+            "ffmpeg", "-y", "-i", input_video,
+            "-vf", vf,
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-c:a", "copy", output_video,
+        ]
+        ok = self._run_ffmpeg(cmd)
+        if ok:
+            print(f"[PostProduction] 统一调色完成 ({style}): {output_video}")
+        return ok
+
+    def apply_unified_sharpness_grain(
+        self,
+        input_video: str,
+        output_video: str,
+        sharpen_strength: float = 0.5,
+        grain_intensity: float = 0.03,
+    ) -> bool:
+        """
+        [SOP 阶段6] 统一锐度与胶片颗粒——提升画面质感和风格统一性。
+
+        Args:
+            sharpen_strength: 锐化强度 0~2 (推荐 0.3~0.8)
+            grain_intensity:  胶片颗粒强度 0~0.1 (推荐 0.02~0.05)
+        """
+        if not os.path.exists(input_video):
+            return False
+
+        # unsharp: luma_msize_x=5, luma_msize_y=5, luma_amount
+        unsharp = f"unsharp=lx=5:ly=5:la={sharpen_strength:.2f}:cx=5:cy=5:ca=0.0"
+        # noise as grain (alls=noise seed, strength)
+        noise = f"noise=alls={int(grain_intensity*100)}:allf=t+u"
+        vf = f"{unsharp},{noise}"
+
+        cmd = [
+            "ffmpeg", "-y", "-i", input_video,
+            "-vf", vf,
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-c:a", "copy", output_video,
+        ]
+        ok = self._run_ffmpeg(cmd)
+        if ok:
+            print(f"[PostProduction] 锐度+颗粒处理完成: {output_video}")
+        return ok
+
+    def apply_dynamic_blur(
+        self,
+        input_video: str,
+        output_video: str,
+        blur_radius: int = 3,
+        motion_threshold: float = 0.3,
+    ) -> bool:
+        """
+        [SOP 阶段6] 动态模糊 —— 为快速运动场景添加运动感，避免画面僵硬。
+
+        Args:
+            blur_radius:       模糊半径 (1~10)
+            motion_threshold: 仅在画面运动量超过此阈值时应用（0~1，0=总是应用）
+        """
+        if not os.path.exists(input_video):
+            return False
+
+        # minterpolate: motion blur at display frame rate
+        vf = (
+            f"minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
+            f"boxblur=lr={blur_radius}:lp=1"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-i", input_video,
+            "-vf", vf,
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-c:a", "copy", output_video,
+        ]
+        ok = self._run_ffmpeg(cmd)
+        # fallback: simple boxblur if minterpolate fails
+        if not ok:
+            cmd = [
+                "ffmpeg", "-y", "-i", input_video,
+                "-vf", f"boxblur=lr={blur_radius}:lp=1",
+                "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-c:a", "copy", output_video,
+            ]
+            ok = self._run_ffmpeg(cmd)
+        if ok:
+            print(f"[PostProduction] 动态模糊处理完成: {output_video}")
+        return ok
+
+    def apply_full_sop_post_processing(
+        self,
+        input_video: str,
+        output_dir: str,
+        color_style: str = "cinematic",
+        apply_grain: bool = True,
+        apply_blur: bool = False,
+    ) -> str:
+        """
+        [SOP 阶段6] 一键应用全套后期处理：调色 → 锐度/颗粒 → (可选)动态模糊。
+
+        Returns:
+            最终输出路径（字符串）
+        """
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 1: 统一调色
+        graded = str(out_dir / "step1_graded.mp4")
+        ok = self.apply_unified_color_grade(input_video, graded, color_style)
+        current = graded if ok else input_video
+
+        # Step 2: 锐度 + 颗粒
+        if apply_grain:
+            grained = str(out_dir / "step2_grain.mp4")
+            ok = self.apply_unified_sharpness_grain(current, grained)
+            if ok:
+                current = grained
+
+        # Step 3: 动态模糊（可选）
+        if apply_blur:
+            blurred = str(out_dir / "step3_blur.mp4")
+            ok = self.apply_dynamic_blur(current, blurred)
+            if ok:
+                current = blurred
+
+        # 输出最终成片
+        final = str(out_dir / "final_sop_processed.mp4")
+        if current != input_video:
+            import shutil as _shutil
+            _shutil.copy2(current, final)
+        else:
+            final = current
+
+        print(f"[PostProduction] SOP 全套后期完成: {final}")
+        return final
