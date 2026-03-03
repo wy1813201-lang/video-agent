@@ -370,8 +370,9 @@ class KeyframeGenerator:
 
         # 7. 质量后缀
         parts.append(
-            "photorealistic, high detail, 4K, cinematic composition, "
-            "portrait vertical 9:16, consistent character design"
+            "hyper-realistic, highly attractive idol-drama aesthetic, high color saturation, "
+            "photorealistic, high detail, 8k resolution, cinematic composition, "
+            "portrait vertical 9:16, consistent character design, masterpiece"
         )
 
         return ", ".join(p for p in parts if p)

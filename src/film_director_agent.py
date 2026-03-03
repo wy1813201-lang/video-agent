@@ -36,6 +36,8 @@ class CameraMovement(str, Enum):
     WHIP_PAN = "whip pan, fast horizontal transition"
     SLOW_MO = "slow motion, time dilation"
     STABILIZED = "gimbal stabilized, ultra-smooth"
+    SNAP_ZOOM = "snap zoom, sudden aggressive punch-in on subject"
+    RAPID_WHIP_PAN = "rapid whip pan, extreme tension high velocity transition"
 
 
 class CameraAngle(str, Enum):
@@ -481,11 +483,11 @@ class FilmDirectorAgent:
     def generate_camera_motions(self) -> None:
         """为每个镜头生成运镜"""
         motion_mapping = {
-            "establishing": [CameraMovement.CRANE, CameraMovement.PULL_BACK],
-            "medium": [CameraMovement.STABILIZED, CameraMovement.TRACKING],
-            "close-up": [CameraMovement.SLOW_PUSH, CameraMovement.DOLLY_IN],
-            "detail": [CameraMovement.TILT_UP, CameraMovement.PAN],
-            "motion": [CameraMovement.TRACKING, CameraMovement.ORBIT, CameraMovement.WHIP_PAN],
+            "establishing": [CameraMovement.RAPID_WHIP_PAN, CameraMovement.CRANE],
+            "medium": [CameraMovement.HANDHELD, CameraMovement.TRACKING],
+            "close-up": [CameraMovement.SNAP_ZOOM, CameraMovement.DOLLY_IN],
+            "detail": [CameraMovement.SNAP_ZOOM, CameraMovement.PAN],
+            "motion": [CameraMovement.RAPID_WHIP_PAN, CameraMovement.TRACKING],
         }
         
         for scene in self.scenes:
@@ -604,15 +606,15 @@ class FilmDirectorAgent:
         用于：Jimeng image-to-video 生成
         """
         # ===== 1. 镜头运动 =====
-        # 只描述运动方式，不重新描述画面
+        # 只描述运动方式，大幅增强张力
         motion_map = {
-            "establishing": "static, no camera movement",
-            "medium": "gentle push in",
-            "close-up": "static hold with subtle rack focus",
-            "detail": "static with subtle focus shift",
-            "motion": "tracking shot, follow movement",
+            "establishing": "rapid whip pan into scene",
+            "medium": "handheld camera with high tension movement",
+            "close-up": "snap zoom punch-in to face, extreme emotional impact",
+            "detail": "snap zoom to detail object",
+            "motion": "aggressive tracking shot, rapid movement",
         }
-        camera_motion = motion_map.get(shot.shot_type, "gentle camera movement")
+        camera_motion = motion_map.get(shot.shot_type, "dynamic high tension camera movement")
         
         # ===== 2. 人物动作 =====
         # 从关键帧姿态自然开始，优先微动作

@@ -113,6 +113,10 @@ class PostProductionDirector:
         music_plan_path = str(pp_dir / "music_plan.json")
         self._save_json(music_plan_path, [asdict(x) for x in music_plan])
 
+        # Stage 6: Generate Subtitles
+        srt_path = str(pp_dir / "bilingual_subtitles.srt")
+        self._generate_srt_file(timeline, srt_path)
+
         voice_track_path = self._render_voice_track(voice_plan, pp_dir)
         bgm_track_path = self._render_music_track(music_plan, pp_dir, total_duration=timeline[-1].end if timeline else 0.0)
 
@@ -121,8 +125,15 @@ class PostProductionDirector:
             clip_paths=clip_paths,
             voice_track_path=voice_track_path,
             bgm_track_path=bgm_track_path,
+            srt_path=srt_path,
             output_dir=output_dir,
         )
+
+        # Generate clickbait thumbnail prompt
+        thumbnail_prompt = self.generate_youtube_thumbnail_prompt(script_text)
+        thumbnail_prompt_path = str(pp_dir / "thumbnail_prompt.txt")
+        with open(thumbnail_prompt_path, "w", encoding="utf-8") as f:
+            f.write(thumbnail_prompt)
 
         return {
             "timeline_path": timeline_path,
@@ -130,6 +141,8 @@ class PostProductionDirector:
             "music_plan_path": music_plan_path,
             "voice_track_path": voice_track_path,
             "bgm_track_path": bgm_track_path,
+            "srt_path": srt_path,
+            "thumbnail_prompt": thumbnail_prompt,
             "final_path": final_path,
         }
 
@@ -386,6 +399,7 @@ class PostProductionDirector:
         clip_paths: List[str],
         voice_track_path: Optional[str],
         bgm_track_path: Optional[str],
+        srt_path: Optional[str],
         output_dir: str,
     ) -> Optional[str]:
         valid = [p for p in clip_paths if p and os.path.exists(p)]
@@ -427,14 +441,33 @@ class PostProductionDirector:
                 map_audio = "[aout]"
 
         if filter_parts and map_audio:
-            cmd += [
-                "-filter_complex", ";".join(filter_parts),
-                "-map", "0:v", "-map", map_audio,
-                "-c:v", "copy", "-c:a", "aac",
-                final_video,
-            ]
+            filter_str = ";".join(filter_parts)
+            # If SRT is provided, add subtitles to the video filter
+            if srt_path and os.path.exists(srt_path):
+                # Escape path for FFmpeg filter
+                srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+                video_filter = f"subtitles={srt_escaped}:force_style='Fontname=Arial,FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=15'"
+                cmd += [
+                    "-filter_complex", filter_str,
+                    "-vf", video_filter,
+                    "-map", "0:v", "-map", map_audio,
+                    "-c:v", "libx264", "-c:a", "aac",
+                    final_video,
+                ]
+            else:
+                cmd += [
+                    "-filter_complex", filter_str,
+                    "-map", "0:v", "-map", map_audio,
+                    "-c:v", "copy", "-c:a", "aac",
+                    final_video,
+                ]
         else:
-            cmd += ["-c:v", "copy", "-c:a", "copy", final_video]
+            if srt_path and os.path.exists(srt_path):
+                srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+                video_filter = f"subtitles={srt_escaped}:force_style='Fontname=Arial,FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=15'"
+                cmd += ["-vf", video_filter, "-c:v", "libx264", "-c:a", "copy", final_video]
+            else:
+                cmd += ["-c:v", "copy", "-c:a", "copy", final_video]
 
         ok = self._run_ffmpeg(cmd)
         if not ok:
@@ -638,3 +671,55 @@ class PostProductionDirector:
 
         print(f"[PostProduction] SOP 全套后期完成: {final}")
         return final
+
+    # ------------------------------------------------------------------ #
+    #  SOP Stage 6: YouTube Meta Enhancements
+    # ------------------------------------------------------------------ #
+
+    def _format_time_srt(self, seconds: float) -> str:
+        """格式化秒数为 SRT 时间格式 (HH:MM:SS,mmm)"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        msec = int((seconds - int(seconds)) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{msec:03d}"
+
+    def _generate_srt_file(self, timeline: List[TimelineItem], srt_path: str) -> bool:
+        """从 timeline 生成双语 SRT 字幕文件"""
+        lines = []
+        seq = 1
+        for item in timeline:
+            if not item.dialogue.strip():
+                continue
+            start_str = self._format_time_srt(item.start)
+            end_str = self._format_time_srt(item.end - 0.1)  # 留出一点间隙
+            lines.append(str(seq))
+            lines.append(f"{start_str} --> {end_str}")
+            # 模拟双语字幕：中文原音，英文直译（可以通过 LLM API获取真实翻译，此处仅拼接格式）
+            clean_zh = item.dialogue.replace('\n', ' ')
+            lines.append(clean_zh)
+            # Todo: 接入真实的翻译 API
+            lines.append(f"[EN Translation of: {clean_zh}]")
+            lines.append("")
+            seq += 1
+        
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return True
+
+    def generate_youtube_thumbnail_prompt(self, script_text: str) -> str:
+        """
+        [SOP 阶段6] 生成 YouTube / TikTok 高转化率封面图的 Prompt
+        抽取极具张力的瞬间（打脸、曝光、震惊）作为缩略图。
+        """
+        # 简单从前几行提取关键词作为核心冲突
+        title_lines = [line for line in script_text.splitlines() if line.strip()][:5]
+        context = " ".join(title_lines)
+        
+        return (
+            "YouTube clickbait thumbnail, extreme emotional reaction, high tension, "
+            "close-up of gorgeous characters, shocked expression, hyper-realistic, "
+            "highly attractive idol-drama aesthetic, cinematic lighting, high saturation, "
+            f"context: {context}, "
+            "bold composition, dramatic rim light, 16:9 aspect ratio, masterpiece"
+        )

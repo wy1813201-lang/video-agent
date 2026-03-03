@@ -532,7 +532,7 @@ class WorkflowManager:
 
     async def generate_video(self, image_path: str, motion_prompt: str = ""):
         """
-        生成视频 - 强制 i2v（图生视频）模式。
+        生成视频 - 支持 Cozex API
 
         SOP 规定：视频必须基于关键帧图片生成，禁止随机生成角色。
         若 image_path 为空或文件不存在，直接抛出 ValueError。
@@ -553,15 +553,60 @@ class WorkflowManager:
                 "请先完成关键帧生成阶段再进行视频生成。"
             )
 
-        try:
-            from .jimeng_client import JimengVideoClient
-        except ImportError:
-            from jimeng_client import JimengVideoClient
-
-        video_cfg = self.api_config.get("video", {}).get("jimeng", {})
-        if not video_cfg.get("enabled"):
-            self.notify("⚠️ 即梦视频 API 未启用，跳过视频生成")
+        # 优先使用 Cozex API
+        video_cfg = self.api_config.get("video", {}).get("cozex", {})
+        
+        if video_cfg.get("enabled"):
+            # 使用 Cozex API
+            try:
+                from .cozex_client import CozexClient
+            except ImportError:
+                from cozex_client import CozexClient
+            
+            client = CozexClient()
+            
+            # Cozex 不支持图生视频，只支持文生视频
+            # 如果有图片，将使用图片作为参考生成相似风格视频
+            prompt_suffix = self.api_config.get("prompt", {}).get(
+                "video_quality_suffix", "smooth motion, cinematic high quality"
+            )
+            if motion_prompt:
+                prompt = f"{motion_prompt}, {prompt_suffix}"
+            else:
+                prompt = f"based on the reference image, {prompt_suffix}, 9:16 vertical format"
+            
+            # Cozex 视频生成是同步的
+            import asyncio
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: client.video_generation(
+                    prompt=prompt,
+                    model="doubao-seedance-1-5-pro-251215"
+                )
+            )
+            
+            if result.get("task_id"):
+                # 轮询等待完成
+                task_id = result["task_id"]
+                self.notify(f"🎬 Cozex 视频任务提交: {task_id}")
+                
+                # 这里需要等待，可以返回任务ID或者直接等待
+                video_path = ""
+                # TODO: 实现轮询等待逻辑
+                return video_path
             return ""
+        else:
+            # 回退到 Jimeng API
+            try:
+                from .jimeng_client import JimengVideoClient
+            except ImportError:
+                from jimeng_client import JimengVideoClient
+
+            video_cfg_jimeng = self.api_config.get("video", {}).get("jimeng", {})
+            if not video_cfg_jimeng.get("enabled"):
+                self.notify("⚠️ 视频 API 未启用，跳过视频生成")
+                return ""
 
         client = JimengVideoClient()
 

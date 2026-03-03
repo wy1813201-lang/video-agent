@@ -26,27 +26,32 @@ VIEW_PROMPT_TEMPLATES = {
     "front": (
         "character design reference sheet, front view, full body, "
         "standing pose, neutral expression, white background, "
-        "{anchor}, precise anatomy proportions, studio lighting"
+        "{anchor}, precise anatomy proportions, studio lighting, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, high color saturation, 8k resolution"
     ),
     "side": (
         "character design reference sheet, side profile view, full body, "
         "standing pose, white background, "
-        "{anchor}, precise anatomy proportions, studio lighting"
+        "{anchor}, precise anatomy proportions, studio lighting, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, high color saturation, 8k resolution"
     ),
     "back": (
         "character design reference sheet, back view, full body, "
         "standing pose, white background, "
-        "{anchor}, precise anatomy proportions, studio lighting"
+        "{anchor}, precise anatomy proportions, studio lighting, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, high color saturation, 8k"
     ),
     "half_body": (
         "character design reference sheet, half body portrait, front view, "
         "upper body visible, white background, "
-        "{anchor}, studio lighting, clear face details"
+        "{anchor}, studio lighting, clear face details, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, high color saturation, 8k resolution"
     ),
     "full_body_proportion": (
         "character design reference sheet, full body proportion diagram, "
         "side by side front and back, height markers, "
-        "{anchor}, white background, model sheet style"
+        "{anchor}, white background, model sheet style, "
+        "hyper-realistic, highly attractive idol-drama aesthetic"
     ),
 }
 
@@ -55,32 +60,38 @@ EXPRESSION_PROMPT_TEMPLATES = {
     "neutral": (
         "character portrait, neutral expression, slight relaxed mouth, "
         "eyes looking forward, calm demeanor, "
-        "{anchor}, {lighting_anchor}, close-up face, white background"
+        "{anchor}, {lighting_anchor}, close-up face, white background, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, masterpiece"
     ),
     "happy": (
         "character portrait, genuine happy smile, eyes slightly narrowed with joy, "
         "teeth not visible, warm upward-curved lips, "
-        "{anchor}, {lighting_anchor}, close-up face, white background"
+        "{anchor}, {lighting_anchor}, close-up face, white background, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, masterpiece"
     ),
     "sad": (
         "character portrait, sad expression, slightly downturned eyebrows, "
         "lower lip slightly trembling, glistening eyes, restrained emotion, "
-        "{anchor}, {lighting_anchor}, close-up face, white background"
+        "{anchor}, {lighting_anchor}, close-up face, white background, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, masterpiece"
     ),
     "determined": (
         "character portrait, determined resolute expression, "
         "tight jaw, direct steady gaze, eyebrows slightly furrowed, "
-        "{anchor}, {lighting_anchor}, close-up face, white background"
+        "{anchor}, {lighting_anchor}, close-up face, white background, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, masterpiece"
     ),
     "surprised": (
         "character portrait, surprised expression, "
         "slightly widened eyes, parted lips, raised inner brows, "
-        "{anchor}, {lighting_anchor}, close-up face, white background"
+        "{anchor}, {lighting_anchor}, close-up face, white background, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, masterpiece"
     ),
     "angry": (
         "character portrait, intense angry expression, "
         "furrowed brows, sharp piercing gaze, clenched jaw, "
-        "{anchor}, {lighting_anchor}, close-up face, white background"
+        "{anchor}, {lighting_anchor}, close-up face, white background, "
+        "hyper-realistic, highly attractive idol-drama aesthetic, masterpiece"
     ),
 }
 
