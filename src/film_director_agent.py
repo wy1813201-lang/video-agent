@@ -134,11 +134,13 @@ class FilmDirectorAgent:
     # 角色数据库
     characters: Dict[str, Character] = {}
     
-    def __init__(self, script: str, visual_style_profile: str = "anime"):
+    def __init__(self, script: str, visual_style_profile: str = "anime", character_registry=None):
         self.script = script
         self.scenes: List[Scene] = []
         self.director_intent: Optional[DirectorIntent] = None
         self.visual_style_profile = (visual_style_profile or "anime").lower()
+        # 角色母版注册表（可选，用于注入结构化角色锚点）
+        self.character_registry = character_registry
     
     # ------------------------------------------------------------------
     # STEP 1: DIRECTOR INTENT ANALYSIS
@@ -665,10 +667,22 @@ class FilmDirectorAgent:
         ]
         return ", ".join([p for p in parts if p])[:1000]
 
-    def _build_continuity_state(self, scene: Scene, shot: Shot) -> Dict[str, str]:
+    def _build_continuity_state(self, scene: Scene, shot: Shot, character_anchors: Dict[str, str] = None) -> Dict[str, str]:
         """构建镜头连续性状态，供下一镜头继承。"""
+        # 使用角色母版锚点（如果有）
+        if character_anchors:
+            scene_chars = self._extract_characters_from_scene(scene)
+            identity_parts = []
+            outfit_parts = []
+            for char_name in scene_chars:
+                if char_name in character_anchors:
+                    identity_parts.append(character_anchors[char_name])
+            identity_lock = "; ".join(identity_parts) if identity_parts else self._build_character_anchor(scene)
+        else:
+            identity_lock = self._build_character_anchor(scene)
+        
         state = {
-            "identity_lock": self._build_character_anchor(scene),
+            "identity_lock": identity_lock,
             "outfit_lock": self._extract_outfit_lock(scene),
             "lighting_lock": shot.lighting_style,
             "location_lock": scene.location,
@@ -676,6 +690,17 @@ class FilmDirectorAgent:
             "action_seed": shot.description,
         }
         return {k: v for k, v in state.items() if v}
+    
+    def _extract_characters_from_scene(self, scene: Scene) -> List[str]:
+        """从场景中提取出现的角色名"""
+        if not scene.content:
+            return []
+        
+        characters = []
+        for name in self.characters.keys():
+            if name in scene.content:
+                characters.append(name)
+        return characters
 
     def _build_continuity_clause(self, shot: Shot, prev_shot: Optional[Shot]) -> str:
         """为 video prompt 生成连续性约束语句。"""
@@ -752,16 +777,47 @@ class FilmDirectorAgent:
           - keyframe_image_prompt → static image generation
           - video_prompt          → image-to-video generation
         Also sets legacy `prompt` field for backward compatibility.
+        
+        如果有 character_registry，会注入角色锚点确保一致性
         """
         prev_shot: Optional[Shot] = None
+        
+        # 获取角色锚点（如果有角色母版注册表）
+        character_anchors = {}
+        if self.character_registry:
+            for master in self.character_registry.list_all():
+                character_anchors[master.name] = master.to_anchor_fragment()
+            if character_anchors:
+                print(f"[FilmDirectorAgent] 注入角色锚点: {list(character_anchors.keys())}")
+        
         for scene in self.scenes:
             for shot in scene.shots:
                 shot.continuity_from_shot_id = prev_shot.shot_id if prev_shot else ""
                 shot.character_prompt = self._build_character_prompt(scene)
                 shot.scene_prompt = self._build_scene_prompt(scene, shot)
                 shot.composition_prompt = self._build_composition_prompt(shot)
-                shot.keyframe_image_prompt = self._build_keyframe_image_prompt(scene, shot)
-                shot.continuity_state = self._build_continuity_state(scene, shot)
+                
+                # 生成基础 keyframe prompt
+                base_prompt = self._build_keyframe_image_prompt(scene, shot)
+                
+                # 注入角色锚点（如果有）
+                if character_anchors:
+                    # 找到该镜头涉及的角色
+                    scene_chars = self._extract_characters_from_scene(scene)
+                    anchor_parts = []
+                    for char_name in scene_chars:
+                        if char_name in character_anchors:
+                            anchor_parts.append(character_anchors[char_name])
+                    
+                    if anchor_parts:
+                        # 将角色锚点放在 prompt 最前面
+                        shot.keyframe_image_prompt = f"{'; '.join(anchor_parts)}, {base_prompt}"
+                    else:
+                        shot.keyframe_image_prompt = base_prompt
+                else:
+                    shot.keyframe_image_prompt = base_prompt
+                
+                shot.continuity_state = self._build_continuity_state(scene, shot, character_anchors)
                 shot.motion_prompt = self._build_motion_prompt(scene, shot, prev_shot=prev_shot)
                 shot.t2v_prompt = self._build_t2v_prompt(scene, shot, shot.motion_prompt)
                 shot.video_prompt = shot.motion_prompt

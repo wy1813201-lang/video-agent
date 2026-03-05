@@ -28,7 +28,8 @@ class Stage(Enum):
     KEYFRAME = "关键帧生成"           # 阶段 4 ★新增
     VIDEO_GEN = "视频生成"            # 阶段 5（强制 i2v）
     ASSEMBLY = "视频合成"             # 阶段 6
-    QUALITY_AUDIT = "质量审核"        # 阶段 7 ★新增
+    QUALITY_AUDIT = "质量审核"        # 阶段 7
+    FEEDBACK_LOOP = "反馈优化"       # 阶段 8 ★新增：最终质检 + 闭环优化
     COMPLETE = "完成"
 
 
@@ -399,10 +400,69 @@ class WorkflowManager:
         audit_report = await self.run_sop_quality_audit(storyboard, character_masters)
         self.state.audit_report = audit_report
 
-        status_icon = "✅" if audit_report.overall_pass else "⚠️"
+        # ── 阶段 8: 反馈优化（终极质检 + 闭环）───────────────
+        await self.update_progress(
+            Stage.FEEDBACK_LOOP, 0.97,
+            "[8/8] 正在进行视频质量评估与闭环优化...", "质检中", 1, 0
+        )
+        
+        # 提取所有 prompts 用于反馈评估
+        all_prompts = []
+        for scene in storyboard.get("scenes", []):
+            for shot in scene.get("shots", []):
+                for key in ["keyframe_image_prompt", "video_prompt", "motion_prompt"]:
+                    if p := shot.get(key, ""):
+                        all_prompts.append(p)
+        
+        feedback_report = await self.run_feedback_optimization(
+            final_video, storyboard, all_prompts
+        )
+        
+        # 根据反馈决定是否重做
+        if feedback_report.needs_regen:
+            self.notify(f"⚠️ 质检发现问题，启动优化流程...")
+            self.notify(feedback_report.summary())
+            
+            # 应用优化操作
+            from feedback_loop import ParameterTuner
+            tuner = ParameterTuner()
+            tuner.apply_actions(feedback_report.optimization_actions)
+            self.notify(f"📝 已自动调整 {len(feedback_report.optimization_actions)} 项配置")
+            
+            # ── 闭环重做 ───────────────────────────────────────
+            regen_result = await self._execute_regen(
+                feedback_report,
+                storyboard,
+                character_masters,
+                keyframes,
+                videos
+            )
+            
+            if regen_result.get("regen_done"):
+                final_video = regen_result.get("final_video", final_video)
+                self.notify(f"🔄 重做完成，评分: {regen_result.get('new_score', 'N/A')}")
+                
+                # 可选：再次评估（递归上限防止无限循环）
+                if regen_result.get("should_recheck") and self.state.regen_counts.get("total", 0) < 3:
+                    self.state.regen_counts["total"] = self.state.regen_counts.get("total", 0) + 1
+                    recheck_report = await self.run_feedback_optimization(
+                        final_video, storyboard, all_prompts
+                    )
+                    if not recheck_report.overall_pass:
+                        self.notify(f"⚠️ 再次质检未通过，可手动调整后重试")
+                    else:
+                        feedback_report = recheck_report
+            else:
+                self.notify(f"⚠️ 跳过重做: {regen_result.get('reason', '未知原因')}")
+        
+        status_icon = "✅" if feedback_report.overall_pass else "⚠️"
+        final_status = f"{status_icon} 全部完成！"
+        if not feedback_report.overall_pass:
+            final_status += f" (质量评分: {feedback_report.scores.overall:.1%})"
+        
         await self.update_progress(
             Stage.COMPLETE, 1.0,
-            f"{status_icon} 全部完成！人物一致性: {audit_report.avg_character_consistency:.1%}",
+            final_status,
             final_video, 1, 1
         )
         return final_video
@@ -553,60 +613,16 @@ class WorkflowManager:
                 "请先完成关键帧生成阶段再进行视频生成。"
             )
 
-        # 优先使用 Cozex API
-        video_cfg = self.api_config.get("video", {}).get("cozex", {})
-        
-        if video_cfg.get("enabled"):
-            # 使用 Cozex API
-            try:
-                from .cozex_client import CozexClient
-            except ImportError:
-                from cozex_client import CozexClient
-            
-            client = CozexClient()
-            
-            # Cozex 不支持图生视频，只支持文生视频
-            # 如果有图片，将使用图片作为参考生成相似风格视频
-            prompt_suffix = self.api_config.get("prompt", {}).get(
-                "video_quality_suffix", "smooth motion, cinematic high quality"
-            )
-            if motion_prompt:
-                prompt = f"{motion_prompt}, {prompt_suffix}"
-            else:
-                prompt = f"based on the reference image, {prompt_suffix}, 9:16 vertical format"
-            
-            # Cozex 视频生成是同步的
-            import asyncio
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: client.video_generation(
-                    prompt=prompt,
-                    model="doubao-seedance-1-5-pro-251215"
-                )
-            )
-            
-            if result.get("task_id"):
-                # 轮询等待完成
-                task_id = result["task_id"]
-                self.notify(f"🎬 Cozex 视频任务提交: {task_id}")
-                
-                # 这里需要等待，可以返回任务ID或者直接等待
-                video_path = ""
-                # TODO: 实现轮询等待逻辑
-                return video_path
-            return ""
-        else:
-            # 回退到 Jimeng API
-            try:
-                from .jimeng_client import JimengVideoClient
-            except ImportError:
-                from jimeng_client import JimengVideoClient
+        # SOP 优先走 Jimeng i2v（真图生视频），确保角色与关键帧绑定。
+        try:
+            from .jimeng_client import JimengVideoClient
+        except ImportError:
+            from jimeng_client import JimengVideoClient
 
-            video_cfg_jimeng = self.api_config.get("video", {}).get("jimeng", {})
-            if not video_cfg_jimeng.get("enabled"):
-                self.notify("⚠️ 视频 API 未启用，跳过视频生成")
-                return ""
+        video_cfg_jimeng = self.api_config.get("video", {}).get("jimeng", {})
+        if not video_cfg_jimeng.get("enabled"):
+            self.notify("⚠️ Jimeng 未启用，跳过 i2v 视频生成")
+            return ""
 
         client = JimengVideoClient()
 
@@ -628,17 +644,29 @@ class WorkflowManager:
                 f"9:16 vertical format"
             )
 
-        resolution = video_cfg.get("default_resolution", "720p")
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: client.video_generation(
+        resolution = video_cfg_jimeng.get("default_resolution", "720p")
+        # Jimeng i2v 需要公网 URL。若是本地路径，落地 pending 状态供上传后重跑。
+        if image_path.startswith("http://") or image_path.startswith("https://"):
+            result = await client.image_to_video(
+                image_url=image_path,
                 prompt=prompt,
-                image_path=image_path,   # i2v: 传入关键帧图片
-                resolution=resolution,
                 aspect_ratio="9:16",
-            ),
-        )
+            )
+        else:
+            status_dir = Path("output/video_generation")
+            status_dir.mkdir(parents=True, exist_ok=True)
+            status_path = status_dir / f"pending_i2v_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            status_payload = {
+                "stage": "视频生成",
+                "status": "pending",
+                "reason": "Jimeng i2v 需要公网可访问 image_url，当前为本地路径",
+                "input_image": image_path,
+                "motion_prompt": motion_prompt,
+                "resolution": resolution,
+            }
+            status_path.write_text(json.dumps(status_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.notify(f"⚠️ i2v 待处理（缺少公网URL）: {status_path}")
+            return ""
 
         video_path = result.get("video_path", "")
         self.notify(f"🎬 [i2v] 视频已保存: {Path(video_path).name if video_path else '无'}")
@@ -713,6 +741,19 @@ class WorkflowManager:
         client = CozexClient() if use_image_api else None
 
         masters = []
+
+        def _build_master_sheet_prompt(master: "CharacterMaster") -> str:
+            """单图角色参考总表：三视图 + 服装细节 + 代表表情。"""
+            anchor = master.to_anchor_fragment()
+            return (
+                "character bible sheet, single image layout with labeled panels, "
+                "panel A front full-body view, panel B side full-body view, panel C back full-body view, "
+                "panel D outfit detail swatches and fabric close-up, "
+                "panel E neutral expression close-up, panel F happy expression close-up, "
+                "panel G sad expression close-up, panel H angry expression close-up, "
+                "same person identity across all panels, strict identity lock, "
+                f"{anchor}, white clean background, studio lighting, high detail model sheet"
+            )
         try:
             characters = extractor.extract_characters(script)
             for role_key, trait in characters.items():
@@ -732,17 +773,18 @@ class WorkflowManager:
                     extra_tags=trait.extra_tags,
                 )
                 
-                # 若开启图像 API，生成官方角色资产图片
+                # 若开启图像 API，生成单图角色总参考表（后续视频/配音统一锚点）
                 if client:
                     try:
-                        prompt = f"Character design reference sheet of {master.name}, {master.gender}, {master.age_range}, {master.hair_color} {master.hair_style}, {master.face_structure}, {master.outfit_primary}, photorealistic, full body portrait, clean white background, consistent character design, concept art."
+                        prompt = _build_master_sheet_prompt(master)
                         loop = asyncio.get_event_loop()
                         image_path = await loop.run_in_executor(
                             None,
-                            lambda m=prompt: client.image_generation(m).get("saved_path", ""),
+                            lambda m=prompt: client.image_generation(m, size="2048x2048").get("saved_path", ""),
                         )
-                        master.reference_image_path = image_path
-                        self.notify(f"🖼️ 角色图片生成成功: {master.name}")
+                        if image_path:
+                            master.reference_images["master_sheet"] = image_path
+                            self.notify(f"🖼️ 角色总参考图生成成功: {master.name}")
                     except Exception as e:
                         self.notify(f"⚠️ 角色 {master.name} 图片生成失败: {e}")
 
@@ -930,3 +972,267 @@ class WorkflowManager:
             f"人物一致性: {report.avg_character_consistency:.1%}"
         )
         return report
+
+    async def run_feedback_optimization(
+        self, final_video: str, storyboard: dict, prompts: List[str]
+    ):
+        """
+        [SOP 阶段8] 视频质量反馈优化闭环
+        - 三维度评分（图文对齐、运动流畅、美学质量）
+        - 根因分析
+        - 自动调整配置
+        - 决定是否需要重做
+        """
+        try:
+            from .feedback_loop import FeedbackLoop, ScoringConfig
+        except ImportError:
+            from feedback_loop import FeedbackLoop, ScoringConfig
+
+        # 获取评分配置
+        scoring_cfg = self.api_config.get("feedback_loop", {})
+        config = ScoringConfig(
+            text_alignment_threshold=scoring_cfg.get("text_alignment_threshold", 0.6),
+            motion_quality_threshold=scoring_cfg.get("motion_quality_threshold", 0.5),
+            aesthetic_threshold=scoring_cfg.get("aesthetic_threshold", 0.6),
+            overall_threshold=scoring_cfg.get("overall_threshold", 0.65),
+        )
+
+        loop = FeedbackLoop(scoring_config=config)
+        
+        # 提取所有 prompt
+        all_prompts = []
+        for scene in storyboard.get("scenes", []):
+            for shot in scene.get("shots", []):
+                for key in ["keyframe_image_prompt", "video_prompt", "motion_prompt"]:
+                    if p := shot.get(key, ""):
+                        all_prompts.append(p)
+
+        # 执行反馈循环
+        report = await loop.evaluate_and_optimize(
+            final_video, storyboard, all_prompts
+        )
+
+        # 保存报告
+        report_path = "output/feedback_report.json"
+        import json as json_module
+        with open(report_path, "w", encoding="utf-8") as f:
+            json_module.dump({
+                "scores": report.scores.to_dict(),
+                "root_causes": [
+                    {
+                        "stage": rc.stage,
+                        "shot_ids": rc.shot_ids,
+                        "confidence": rc.confidence,
+                        "description": rc.description,
+                        "suggestions": rc.suggestions,
+                    }
+                    for rc in report.root_causes
+                ],
+                "optimization_actions": [
+                    {
+                        "action_type": op.action_type,
+                        "target": op.target,
+                        "reason": op.reason,
+                    }
+                    for op in report.optimization_actions
+                ],
+                "overall_pass": report.overall_pass,
+                "needs_regen": report.needs_regen,
+                "regen_plan": report.regen_plan,
+            }, f, ensure_ascii=False, indent=2)
+
+        self.notify(
+            f"🎯 反馈优化完成: 综合评分 {report.scores.overall:.1%}, "
+            f"图文对齐: {report.scores.text_alignment:.1%}, "
+            f"运动质量: {report.scores.motion_quality:.1%}, "
+            f"美学: {report.scores.aesthetic:.1%}"
+        )
+        
+        return report
+
+    async def _execute_regen(
+        self,
+        feedback_report,
+        storyboard: dict,
+        character_masters: list,
+        keyframes: Dict[str, str],
+        old_videos: List[str],
+    ) -> dict:
+        """
+        执行闭环重做
+        返回: {"regen_done": bool, "final_video": str, "new_score": float, "should_recheck": bool, "reason": str}
+        """
+        regen_plan = feedback_report.regen_plan
+        actions = feedback_report.optimization_actions
+        
+        # 检查是否达到重做上限
+        total_regen = self.state.regen_counts.get("total", 0)
+        if total_regen >= 3:
+            return {"regen_done": False, "reason": "已达到最大重做次数(3次)"}
+        
+        self.notify(f"🔄 开始执行 {regen_plan} 级别重做...")
+        
+        # ── Shot 级别：重做特定分镜 ─────────────────────────────
+        if regen_plan == "shot":
+            shot_actions = [a for a in actions if a.action_type == "regen_shot"]
+            if not shot_actions:
+                return {"regen_done": False, "reason": "无分镜需要重做"}
+            
+            shot_ids_to_regen = [a.target for a in shot_actions]
+            self.notify(f"📍 重新生成分镜: {', '.join(shot_ids_to_regen[:3])}")
+            
+            # 重新生成这些分镜的 keyframe + video
+            new_videos = []
+            for shot_id in shot_ids_to_regen:
+                # 找到对应的 keyframe
+                img_path = keyframes.get(shot_id, "")
+                if not img_path:
+                    continue
+                
+                # 找到对应的 prompt
+                shot_prompt = ""
+                for scene in storyboard.get("scenes", []):
+                    for shot in scene.get("shots", []):
+                        if shot.get("shot_id") == shot_id:
+                            shot_prompt = shot.get("video_prompt") or shot.get("motion_prompt", "")
+                            break
+                
+                # 重新生成视频
+                try:
+                    video_path = await self.generate_video(img_path, shot_prompt)
+                    if video_path:
+                        new_videos.append(video_path)
+                        self.state.regen_counts[shot_id] = self.state.regen_counts.get(shot_id, 0) + 1
+                except Exception as e:
+                    self.notify(f"⚠️ 分镜 {shot_id} 重做失败: {e}")
+            
+            # 替换旧视频片段
+            if new_videos:
+                # 用新视频替换旧的
+                for new_v in new_videos:
+                    if new_v and Path(new_v).exists():
+                        old_videos.append(new_v)
+                
+                # 重新合成
+                final_video = await self.assemble_videos(old_videos)
+                return {
+                    "regen_done": True,
+                    "final_video": final_video,
+                    "new_score": "待评估",
+                    "should_recheck": True
+                }
+            return {"regen_done": False, "reason": "分镜重做后无有效视频"}
+        
+        # ── Stage 级别：重做某个阶段 ───────────────────────────
+        elif regen_plan == "stage":
+            # 判断需要重做的阶段
+            stage_actions = [a for a in actions if a.action_type in ("adjust_params", "enhance_prompt_template")]
+            
+            # 重新加载配置
+            self.api_config = self._load_config()
+            
+            # 检查是否需要重做视频生成
+            video_actions = [a for a in stage_actions if "video" in a.target]
+            if video_actions:
+                self.notify("🎬 重新生成视频（参数已调整）...")
+                videos = []
+                for shot_id, img_path in keyframes.items():
+                    if not img_path:
+                        continue
+                    shot_prompt = ""
+                    for scene in storyboard.get("scenes", []):
+                        for shot in scene.get("shots", []):
+                            if shot.get("shot_id") == shot_id:
+                                shot_prompt = shot.get("video_prompt") or shot.get("motion_prompt", "")
+                                break
+                    try:
+                        v = await self.generate_video(img_path, shot_prompt)
+                        if v:
+                            videos.append(v)
+                    except Exception as e:
+                        self.notify(f"⚠️ {shot_id} 生成失败: {e}")
+                
+                if videos:
+                    final_video = await self.assemble_videos(videos)
+                    return {
+                        "regen_done": True,
+                        "final_video": final_video,
+                        "new_score": "待评估",
+                        "should_recheck": True
+                    }
+            
+            # 检查是否需要重做关键帧
+            keyframe_actions = [a for a in stage_actions if "image" in a.target or "keyframe" in a.target]
+            if keyframe_actions:
+                self.notify("🖼️ 重新生成关键帧（参数已调整）...")
+                new_keyframes = await self.generate_all_keyframes(storyboard, character_masters)
+                
+                # 用新关键帧重新生成视频
+                videos = []
+                for shot_id, img_path in new_keyframes.items():
+                    if not img_path:
+                        continue
+                    shot_prompt = ""
+                    for scene in storyboard.get("scenes", []):
+                        for shot in scene.get("shots", []):
+                            if shot.get("shot_id") == shot_id:
+                                shot_prompt = shot.get("video_prompt") or shot.get("motion_prompt", "")
+                                break
+                    try:
+                        v = await self.generate_video(img_path, shot_prompt)
+                        if v:
+                            videos.append(v)
+                    except:
+                        pass
+                
+                if videos:
+                    final_video = await self.assemble_videos(videos)
+                    return {
+                        "regen_done": True,
+                        "final_video": final_video,
+                        "new_score": "待评估",
+                        "should_recheck": True
+                    }
+            
+            return {"regen_done": False, "reason": "阶段重做无可用操作"}
+        
+        # ── Full 级别：全流程重跑 ─────────────────────────────
+        elif regen_plan == "full":
+            self.notify("🔁 全流程重跑（配置已更新）...")
+            
+            # 保存当前状态用于恢复
+            old_config = self.api_config.copy()
+            
+            # 重新加载最新配置
+            self.api_config = self._load_config()
+            
+            # 重新执行关键阶段（视频生成 + 合成）
+            videos = []
+            for shot_id, img_path in keyframes.items():
+                if not img_path:
+                    continue
+                shot_prompt = ""
+                for scene in storyboard.get("scenes", []):
+                    for shot in scene.get("shots", []):
+                        if shot.get("shot_id") == shot_id:
+                            shot_prompt = shot.get("video_prompt") or shot.get("motion_prompt", "")
+                            break
+                try:
+                    v = await self.generate_video(img_path, shot_prompt)
+                    if v:
+                        videos.append(v)
+                except Exception as e:
+                    self.notify(f"⚠️ {shot_id} 失败: {e}")
+            
+            if videos:
+                final_video = await self.assemble_videos(videos)
+                return {
+                    "regen_done": True,
+                    "final_video": final_video,
+                    "new_score": "待评估",
+                    "should_recheck": True
+                }
+            
+            return {"regen_done": False, "reason": "全流程重做失败"}
+        
+        return {"regen_done": False, "reason": f"未知重做计划: {regen_plan}"}

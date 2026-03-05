@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI短剧 - 版本选择</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .versions-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        .version-card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s, box-shadow 0.3s;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .version-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .version-card.selected {
+            border: 3px solid #667eea;
+            transform: translateY(-5px);
+        }
+
+        .version-card.selected::before {
+            content: "✓";
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            width: 40px;
+            height: 40px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .version-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .version-title {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .version-badge {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+        }
+
+        .params-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .param-item {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .param-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .param-value {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .content-preview {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .content-preview h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .content-preview pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: "Courier New", monospace;
+            font-size: 0.95em;
+            line-height: 1.6;
+            color: #333;
+        }
+
+        .selection-panel {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-top: 30px;
+        }
+
+        .selection-panel h3 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+
+        .reason-input {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1em;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 100px;
+            transition: border-color 0.3s;
+        }
+
+        .reason-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #666;
+        }
+
+        .btn-secondary:hover {
+            background: #d0d0d0;
+        }
+
+        .loading {
+            text-align: center;
+            color: white;
+            font-size: 1.2em;
+            padding: 50px;
+        }
+
+        .success-message {
+            background: #4caf50;
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            font-size: 1.2em;
+            margin-top: 20px;
+            animation: slideIn 0.5s;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .error-message {
+            background: #f44336;
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 10px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 AI短剧版本选择</h1>
+            <p>请选择最佳版本并说明理由</p>
+        </div>
+
+        <div id="loading" class="loading">
+            加载中...
+        </div>
+
+        <div id="content" style="display: none;">
+            <div class="versions-grid" id="versionsGrid">
+                <!-- 版本卡片将通过 JavaScript 动态生成 -->
+            </div>
+
+            <div class="selection-panel">
+                <h3>📝 选择理由</h3>
+                <textarea
+                    id="reasonInput"
+                    class="reason-input"
+                    placeholder="请说明你选择这个版本的理由（例如：开头更有冲击力，情绪更强烈，更能吸引观众）"
+                ></textarea>
+                <div class="error-message" id="errorMessage"></div>
+                <div class="button-group">
+                    <button class="btn btn-secondary" onclick="skipSelection()">跳过选择</button>
+                    <button class="btn btn-primary" id="submitBtn" onclick="submitSelection()" disabled>
+                        确认选择
+                    </button>
+                </div>
+            </div>
+
+            <div id="successMessage" style="display: none;" class="success-message">
+                ✓ 选择已提交！系统将使用你选择的版本继续生成...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let versions = [];
+        let selectedVersionId = null;
+
+        // 加载版本数据
+        async function loadVersions() {
+            try {
+                const response = await fetch('/api/versions');
+                versions = await response.json();
+
+                if (versions.length === 0) {
+                    document.getElementById('loading').textContent = '没有可选择的版本';
+                    return;
+                }
+
+                renderVersions();
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+            } catch (error) {
+                console.error('加载失败:', error);
+                document.getElementById('loading').textContent = '加载失败，请刷新页面重试';
+            }
+        }
+
+        // 渲染版本卡片
+        function renderVersions() {
+            const grid = document.getElementById('versionsGrid');
+            grid.innerHTML = '';
+
+            versions.forEach((version, index) => {
+                const card = createVersionCard(version, index + 1);
+                grid.appendChild(card);
+            });
+        }
+
+        // 创建版本卡片
+        function createVersionCard(version, number) {
+            const card = document.createElement('div');
+            card.className = 'version-card';
+            card.onclick = () => selectVersion(version.version_id);
+
+            const params = version.params || {};
+            const content = version.content || '';
+
+            card.innerHTML = `
+                <div class="version-header">
+                    <div class="version-title">版本 ${number}</div>
+                    <div class="version-badge">${params.name || '未命名'}</div>
+                </div>
+                <div class="params-grid">
+                    ${params.conflict_timing ? `
+                        <div class="param-item">
+                            <div class="param-label">冲突时间</div>
+                            <div class="param-value">${translateParam('conflict_timing', params.conflict_timing)}</div>
+                        </div>
+                    ` : ''}
+                    ${params.reversal_count ? `
+                        <div class="param-item">
+                            <div class="param-label">反转次数</div>
+                            <div class="param-value">${params.reversal_count} 个</div>
+                        </div>
+                    ` : ''}
+                    ${params.emotion_intensity ? `
+                        <div class="param-item">
+                            <div class="param-label">情绪强度</div>
+                            <div class="param-value">${translateParam('emotion_intensity', params.emotion_intensity)}</div>
+                        </div>
+                    ` : ''}
+                    ${params.hook_style ? `
+                        <div class="param-item">
+                            <div class="param-label">Hook风格</div>
+                            <div class="param-value">${translateParam('hook_style', params.hook_style)}</div>
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="content-preview">
+                    <h4>📄 内容预览</h4>
+                    <pre>${content.substring(0, 300)}${content.length > 300 ? '...' : ''}</pre>
+                </div>
+            `;
+
+            return card;
+        }
+
+        // 翻译参数值
+        function translateParam(key, value) {
+            const translations = {
+                conflict_timing: {
+                    immediate: '立即冲突',
+                    early: '早期冲突',
+                    delayed: '延迟冲突'
+                },
+                emotion_intensity: {
+                    extreme: '极端情绪',
+                    high: '高强度',
+                    medium: '中等强度'
+                },
+                hook_style: {
+                    shock: '震惊式',
+                    mystery: '悬念式',
+                    emotional: '情感式'
+                }
+            };
+
+            return translations[key]?.[value] || value;
+        }
+
+        // 选择版本
+        function selectVersion(versionId) {
+            selectedVersionId = versionId;
+
+            // 更新卡片样式
+            document.querySelectorAll('.version-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            event.currentTarget.classList.add('selected');
+
+            // 启用提交按钮
+            document.getElementById('submitBtn').disabled = false;
+            document.getElementById('errorMessage').style.display = 'none';
+        }
+
+        // 提交选择
+        async function submitSelection() {
+            if (!selectedVersionId) {
+                showError('请先选择一个版本');
+                return;
+            }
+
+            const reason = document.getElementById('reasonInput').value.trim();
+            if (!reason) {
+                showError('请说明选择理由');
+                return;
+            }
+
+            const selectedVersion = versions.find(v => v.version_id === selectedVersionId);
+            if (!selectedVersion) {
+                showError('选择的版本无效');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/select', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        version_id: selectedVersionId,
+                        reason: reason,
+                        content: selectedVersion.content
+                    })
+                });
+
+                if (response.ok) {
+                    document.getElementById('content').style.display = 'none';
+                    document.getElementById('successMessage').style.display = 'block';
+
+                    // 3秒后可以关闭窗口
+                    setTimeout(() => {
+                        document.getElementById('successMessage').innerHTML += '<br><br>你可以关闭此窗口了';
+                    }, 3000);
+                } else {
+                    showError('提交失败，请重试');
+                }
+            } catch (error) {
+                console.error('提交失败:', error);
+                showError('提交失败，请重试');
+            }
+        }
+
+        // 跳过选择
+        async function skipSelection() {
+            if (confirm('确定要跳过选择吗？系统将使用原版本。')) {
+                try {
+                    await fetch('/api/select', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            version_id: null,
+                            reason: '跳过选择',
+                            content: null
+                        })
+                    });
+
+                    document.getElementById('content').style.display = 'none';
+                    document.getElementById('successMessage').textContent = '已跳过选择，使用原版本';
+                    document.getElementById('successMessage').style.display = 'block';
+                } catch (error) {
+                    showError('操作失败，请重试');
+                }
+            }
+        }
+
+        // 显示错误消息
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+
+        // 页面加载时获取数据
+        window.onload = loadVersions;
+    </script>
+</body>
+</html>

@@ -8,6 +8,10 @@ import os
 import json
 import requests
 from typing import Optional, Dict, Any
+try:
+    from .script_schema import validate_structured_script
+except ImportError:
+    from script_schema import validate_structured_script
 
 # 可以集成的 LLM 客户端
 OPENAI_AVAILABLE = False
@@ -28,6 +32,7 @@ except ImportError:
 
 class ScriptGenerator:
     """AI剧本生成器"""
+    MAX_SCHEMA_RETRIES = 3
     
     SYSTEM_PROMPT = """你是一个专业的小说家和剧本作家，精通AI短剧工业化制作流程。
 你擅长创作吸引人的短剧剧本，特别是:
@@ -97,7 +102,18 @@ class ScriptGenerator:
             self.client_type = "gemini_web"
             return
         
-        # 优先使用自定义 Opus 端点
+        # 优先级: minimax > custom_opus > openai > anthropic
+        minimax_cfg = self.api_config.get("script", {}).get("minimax", {})
+        if minimax_cfg.get("enabled") and minimax_cfg.get("api_key"):
+            self.minimax_config = {
+                "api_key": minimax_cfg["api_key"],
+                "group_id": minimax_cfg.get("group_id", ""),
+                "model": minimax_cfg.get("model", "MiniMax-M2.5")
+            }
+            self.client_type = "minimax"
+            return
+        
+        # 自定义 Opus 端点
         custom_opus = self.api_config.get("script", {}).get("custom_opus", {})
         if custom_opus.get("enabled") and custom_opus.get("api_key"):
             self.custom_opus = {
@@ -106,10 +122,14 @@ class ScriptGenerator:
                 "model": custom_opus.get("model", "claude-opus-4-6")
             }
             self.client_type = "custom_opus"
-        elif config.openai_api_key and OPENAI_AVAILABLE:
+            return
+        
+        if config.openai_api_key and OPENAI_AVAILABLE:
             openai.api_key = config.openai_api_key
             self.client_type = "openai"
-        elif config.anthropic_api_key and ANTHROPIC_AVAILABLE:
+            return
+            
+        if config.anthropic_api_key and ANTHROPIC_AVAILABLE:
             self.client = anthropic.Anthropic(api_key=config.anthropic_api_key)
             self.client_type = "anthropic"
     
@@ -146,7 +166,7 @@ class ScriptGenerator:
         if story_context:
             story_section = f"\n\n【连载上下文（Story Bible）】\n{story_context}\n"
 
-        user_prompt = f"""请为以下主题生成第{episode_num}集剧本:
+        base_prompt = f"""请为以下主题生成第{episode_num}集剧本:
 主题: {topic}
 风格: {self.config.style}
 总集数: {total_episodes}
@@ -154,20 +174,53 @@ class ScriptGenerator:
 {market_section}
 {story_section}
 请生成完整的剧本，包含场景描述和对话。每集内容要有变化，不要重复。"""
-        
-        try:
-            if self.client_type == "gemini_web":
-                return await self._generate_gemini_web(user_prompt, topic, episode_num, total_episodes)
-            elif self.client_type == "custom_opus":
-                return await self._generate_custom_opus(user_prompt)
-            elif self.client_type == "openai":
-                return await self._generate_openai(user_prompt)
-            elif self.client_type == "anthropic":
-                return await self._generate_anthropic(user_prompt)
-            else:
-                return self._generate_fallback(topic, episode_num)
-        except Exception as e:
-            raise RuntimeError(f"第{episode_num}集剧本生成失败: {e}") from e
+
+        # Gemini Web 客户端返回的是文本化剧本，不做 JSON Schema 强校验。
+        if self.client_type == "gemini_web":
+            try:
+                return await self._generate_gemini_web(base_prompt, topic, episode_num, total_episodes)
+            except Exception as e:
+                raise RuntimeError(f"第{episode_num}集剧本生成失败: {e}") from e
+
+        # 其余模型要求输出结构化 JSON，自动校验+重试。
+        prompt = base_prompt
+        last_issues = []
+        for attempt in range(1, self.MAX_SCHEMA_RETRIES + 1):
+            try:
+                if self.client_type == "minimax":
+                    raw = await self._generate_minimax(prompt)
+                elif self.client_type == "custom_opus":
+                    raw = await self._generate_custom_opus(prompt)
+                elif self.client_type == "openai":
+                    raw = await self._generate_openai(prompt)
+                elif self.client_type == "anthropic":
+                    raw = await self._generate_anthropic(prompt)
+                else:
+                    return self._generate_fallback(topic, episode_num)
+
+                structured = self.parse_structured_script(raw)
+                if structured is not None:
+                    ok, issues = validate_structured_script(structured)
+                    if ok:
+                        return raw
+                    last_issues = issues[:8]
+                else:
+                    last_issues = ["未解析出有效 JSON（缺少 ```json 区块或结构不合法）"]
+
+                if attempt < self.MAX_SCHEMA_RETRIES:
+                    fix_hint = "；".join(last_issues)
+                    prompt = (
+                        base_prompt
+                        + "\n\n上一次输出未通过 JSON Schema 校验。"
+                        + "请仅输出一个 ```json ... ``` 代码块，不要输出任何解释。"
+                        + f"\n未通过项: {fix_hint}"
+                    )
+            except Exception as e:
+                if attempt >= self.MAX_SCHEMA_RETRIES:
+                    raise RuntimeError(f"第{episode_num}集剧本生成失败: {e}") from e
+
+        issue_msg = "；".join(last_issues) if last_issues else "未知结构错误"
+        raise RuntimeError(f"第{episode_num}集剧本生成失败: JSON校验未通过 ({issue_msg})")
     
     async def _generate_custom_opus(self, prompt: str) -> str:
         """使用自定义 Opus 端点生成"""
@@ -189,6 +242,35 @@ class ScriptGenerator:
         
         result = response.json()
         return result["content"][0]["text"]
+    
+    async def _generate_minimax(self, prompt: str) -> str:
+        """使用 MiniMax M2.5 生成"""
+        import asyncio
+        
+        url = "https://api.minimax.chat/v1/text/chatcompletion_pro"
+        headers = {
+            "Authorization": f"Bearer {self.minimax_config['api_key']}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": self.minimax_config["model"],
+            "group_id": self.minimax_config["group_id"],
+            "max_tokens": 4000,
+            "temperature": 0.8,
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ]
+        }
+        
+        def _sync_call():
+            response = requests.post(url, headers=headers, json=data, timeout=120)
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+        
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_call)
     
     async def _generate_openai(self, prompt: str) -> str:
         """使用 OpenAI 生成"""

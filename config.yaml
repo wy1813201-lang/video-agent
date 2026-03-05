@@ -46,6 +46,14 @@ story_bible:
   enabled: true
   path: "data/story_bible.json"
 
+# ── Meta Director（老板 Agent）─────────────────────────────────────
+meta_director:
+  enabled: false              # 是否启用 Meta Director
+  min_score: 8.5              # 最低通过分数（所有维度都必须达到 8.5）
+  enable_experiments: true    # 是否启用实验版本生成
+  experiment_count: 2         # 实验版本数量
+  records_dir: "data/production_records"  # 生产记录保存目录
+
 # ── SOP 阶段5: 视频生成（强制 i2v）────────────────────────────────────
 video_generation:
   primary_method: "i2v"       # 【SOP锁定】只允许 i2v（图生视频），禁止随机生成
@@ -61,6 +69,15 @@ quality_audit:
   min_shots_per_scene: 1
   max_actions_per_shot: 1
 
+# ── 自动化编排层（队列/重试/QA）─────────────────────────────────────
+pipeline:
+  max_concurrent_shots: 2      # 单集并发镜头任务数（受 API 限流影响）
+  retry_max_attempts: 3        # API 异常最大重试次数
+  retry_base_delay_sec: 2.0    # 指数退避起始秒数
+  qa:
+    enabled: true
+    min_video_score: 0.6       # 自动判废阈值（低于则重生/回退）
+
 video:
   transition: "dissolve"      # SOP推荐: dissolve（叠化）/ fade（淡入淡出）
   transition_duration: 0.8    # 略长转场，更自然
@@ -75,4 +92,11 @@ ai:
 tts:
   provider: "edge_tts"        # edge_tts / openai
   voice: "zh-CN-XiaoxiaoNeural"
-
+  # 可选：按角色名指定固定音色（保障角色说话一致）
+  # 支持值：xiaoxiao/xiaoyi/yunxi/yunjian/yunyang/xiaobei 或完整 Edge voice id
+  character_voice_map: {}
+  # 示例：
+  # character_voice_map:
+  #   苏念: "xiaoxiao"
+  #   陆沉: "yunxi"
+  #   旁白: "yunjian"

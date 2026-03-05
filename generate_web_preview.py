@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+Web 界面预览 - 生成静态 HTML 预览
+
+不需要启动服务器，直接生成一个可以在浏览器中打开的预览文件
+"""
+
+import os
+
+# 创建预览 HTML
+preview_html = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI短剧 - 版本选择界面预览</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .versions-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        .version-card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s, box-shadow 0.3s;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .version-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .version-card.selected {
+            border: 3px solid #667eea;
+            transform: translateY(-5px);
+        }
+
+        .version-card.selected::before {
+            content: "✓";
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            width: 40px;
+            height: 40px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .version-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .version-title {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .version-badge {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+        }
+
+        .params-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .param-item {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .param-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .param-value {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .content-preview {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .content-preview h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .content-preview pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: "Courier New", monospace;
+            font-size: 0.95em;
+            line-height: 1.6;
+            color: #333;
+        }
+
+        .selection-panel {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-top: 30px;
+        }
+
+        .selection-panel h3 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+
+        .reason-input {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1em;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 100px;
+            transition: border-color 0.3s;
+        }
+
+        .reason-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #666;
+        }
+
+        .btn-secondary:hover {
+            background: #d0d0d0;
+        }
+
+        .demo-note {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            color: #856404;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 1.1em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 AI短剧版本选择</h1>
+            <p>请选择最佳版本并说明理由</p>
+        </div>
+
+        <div class="demo-note">
+            📌 这是界面预览 - 点击版本卡片可以选中，实际使用时会提交到系统
+        </div>
+
+        <div class="versions-grid">
+            <!-- 版本 1 -->
+            <div class="version-card" onclick="selectCard(this, 1)">
+                <div class="version-header">
+                    <div class="version-title">版本 1</div>
+                    <div class="version-badge">快节奏版</div>
+                </div>
+                <div class="params-grid">
+                    <div class="param-item">
+                        <div class="param-label">冲突时间</div>
+                        <div class="param-value">立即冲突</div>
+                    </div>
+                    <div class="param-item">
+                        <div class="param-label">反转次数</div>
+                        <div class="param-value">3 个</div>
+                    </div>
+                    <div class="param-item">
+                        <div class="param-label">情绪强度</div>
+                        <div class="param-value">极端情绪</div>
+                    </div>
+                    <div class="param-item">
+                        <div class="param-label">Hook风格</div>
+                        <div class="param-value">震惊式</div>
+                    </div>
+                </div>
+                <div class="content-preview">
+                    <h4>📄 内容预览</h4>
+                    <pre>第1集：重生复仇
+
+场景1: [震惊开场·立即冲突]
+女主: （尖叫）不！这不可能！我死了...又活了？
+旁白: 她死了，又活了...时间倒流到十年前！
+女主: （暴怒）这一世，我要让所有人付出代价！
+
+场景2: [极端情绪·快速反转]
+妈妈: 你怎么了？
+女主: （崩溃）妈妈！你还活着！（泪流满面）...</pre>
+                </div>
+            </div>
+
+            <!-- 版本 2 -->
+            <div class="version-card" onclick="selectCard(this, 2)">
+                <div class="version-header">
+                    <div class="version-title">版本 2</div>
+                    <div class="version-badge">标准版</div>
+                </div>
+                <div class="params-grid">
+                    <div class="param-item">
+                        <div class="param-label">冲突时间</div>
+                        <div class="param-value">早期冲突</div>
+                    </div>
+                    <div class="param-item">
+                        <div class="param-label">反转次数</div>
+                        <div class="param-value">2 个</div>
+                    </div>
+                    <div class="param-item">
+                        <div class="param-label">情绪强度</div>
+                        <div class="param-value">高强度</div>
+                    </div>
+                    <div class="param-item">
+                        <div class="param-label">Hook风格</div>
+                        <div class="param-value">悬念式</div>
+                    </div>
+                </div>
+                <div class="content-preview">
+                    <h4>📄 内容预览</h4>
+                    <pre>第1集：重生归来
+
+场景1: [悬念开场]
+女主: （疑惑）这是...哪里？
+旁白: 一切似乎都不对劲...
+女主: （震惊）等等...这是十年前的房间！
+
+场景2: [早期冲突·情绪递进]
+妈妈: 起来了？快来吃早餐。
+女主: （震惊）妈妈？你还活着？...</pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="selection-panel">
+            <h3>📝 选择理由</h3>
+            <textarea
+                id="reasonInput"
+                class="reason-input"
+                placeholder="请说明你选择这个版本的理由（例如：开头更有冲击力，情绪更强烈，更能吸引观众）"
+            ></textarea>
+            <div class="button-group">
+                <button class="btn btn-secondary" onclick="alert('跳过选择')">跳过选择</button>
+                <button class="btn btn-primary" onclick="submitDemo()">确认选择</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedVersion = null;
+
+        function selectCard(card, version) {
+            // 移除所有选中状态
+            document.querySelectorAll('.version-card').forEach(c => {
+                c.classList.remove('selected');
+            });
+
+            // 添加选中状态
+            card.classList.add('selected');
+            selectedVersion = version;
+        }
+
+        function submitDemo() {
+            const reason = document.getElementById('reasonInput').value.trim();
+
+            if (!selectedVersion) {
+                alert('请先选择一个版本');
+                return;
+            }
+
+            if (!reason) {
+                alert('请说明选择理由');
+                return;
+            }
+
+            alert(`✓ 选择成功！\\n\\n选中版本: 版本 ${selectedVersion}\\n选择理由: ${reason}\\n\\n在真实系统中，这个选择会被提交并继续生成流程。`);
+        }
+    </script>
+</body>
+</html>
+"""
+
+# 保存预览文件
+output_path = "/Users/you/.openclaw/workspace/ai-short-drama-automator/web_selector_preview.html"
+with open(output_path, 'w', encoding='utf-8') as f:
+    f.write(preview_html)
+
+print("=" * 60)
+print("Web 界面预览已生成")
+print("=" * 60)
+print(f"\n✓ 预览文件: {output_path}")
+print(f"\n📌 打开方式:")
+print(f"   1. 在浏览器中打开: file://{output_path}")
+print(f"   2. 或运行: open {output_path}")
+print(f"\n💡 这是一个静态预览，展示界面的样子")
+print(f"   真实使用时会连接到后端服务器")

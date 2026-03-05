@@ -34,11 +34,11 @@ class JimengVideoClient:
         "temperament": "冷静自信",
     }
 
-    def __init__(self):
+    def __init__(self, cfg_override: Optional[Dict[str, Any]] = None):
         with open(CONFIG_PATH) as f:
             config = json.load(f)
 
-        cfg = config.get("video", {}).get("jimeng", {})
+        cfg = cfg_override or config.get("video", {}).get("jimeng", {})
         self.access_key = cfg.get("access_key", "")
         # SK直接使用原始字符串，不做任何base64解码
         self.secret_key = cfg.get("secret_key", "")

@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Streamlit 审核界面（人在回路）
+"""
+分阶段审核界面（人在回路）
 
-能力：
-1. 加载 storyboard_flow_*.json
-2. 网格查看关键帧
-3. 修改 prompt 并单帧重绘
-4. 保存审核结果
-5. 一键发车：按审核后的关键帧生成视频并合成
+审核阶段：
+1. 剧本审核 - 审核剧本内容
+2. 分镜审核 - 审核分镜结构
+3. 关键帧审核 - 审核生成的图片
+4. 视频审核 - 审核生成的视频
+5. 成片审核 - 审核最终成品
+
+每个阶段都可以：
+- 通过 → 进入下一阶段
+- 打回 → 填写修改意见，返回重新生成
 
 运行：
   streamlit run web/review_streamlit.py
@@ -17,215 +22,667 @@ import json
 import os
 import re
 import sys
+import glob
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
+# 配置页面
+st.set_page_config(
+    page_title="AI短剧审核中心", 
+    layout="wide",
+    page_icon="🎬"
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.cozex_client import CozexClient  # noqa: E402
-from src.jimeng_client import JimengVideoClient  # noqa: E402
-from src.video_composer import CompositionConfig, VideoClip, VideoComposer  # noqa: E402
+# 尝试导入（不阻塞）
+try:
+    from src.cozex_client import CozexClient
+    from src.jimeng_client import JimengVideoClient
+    from src.video_composer import CompositionConfig, VideoClip, VideoComposer
+    CLIENTS_AVAILABLE = True
+except ImportError:
+    CLIENTS_AVAILABLE = False
 
 
-STORYBOARD_DIR = ROOT / "output" / "storyboards"
-DEFAULT_SIZE = "1536x2560"
+# ==================== 路径配置 ====================
+OUTPUT_DIR = ROOT / "output"
+STORYBOARD_DIR = OUTPUT_DIR / "storyboards"
+AUDIO_DIR = OUTPUT_DIR / "audio"
+SUBTITLE_DIR = OUTPUT_DIR / "subtitles"
+FINAL_DIR = OUTPUT_DIR / "final"
+
+for d in [OUTPUT_DIR, STORYBOARD_DIR, AUDIO_DIR, SUBTITLE_DIR, FINAL_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
 
 
-def list_storyboard_files() -> List[Path]:
-    STORYBOARD_DIR.mkdir(parents=True, exist_ok=True)
-    files = sorted(STORYBOARD_DIR.glob("storyboard_flow_ep*.json"), reverse=True)
-    return files
+# ==================== 审核阶段定义 ====================
+class ReviewStage:
+    """审核阶段"""
+    SCRIPT = "script"           # 剧本
+    STORYBOARD = "storyboard"   # 分镜
+    KEYFRAME = "keyframe"       # 关键帧
+    VIDEO = "video"             # 视频
+    FINAL = "final"             # 成片
+    
+    @classmethod
+    def all(cls):
+        return [cls.SCRIPT, cls.STORYBOARD, cls.KEYFRAME, cls.VIDEO, cls.FINAL]
+    
+    @classmethod
+    def label(cls, stage):
+        labels = {
+            cls.SCRIPT: "📝 剧本审核",
+            cls.STORYBOARD: "🎬 分镜审核",
+            cls.KEYFRAME: "🖼️ 关键帧审核",
+            cls.VIDEO: "🎥 视频审核",
+            cls.FINAL: "✅ 成片审核",
+        }
+        return labels.get(stage, stage)
+    
+    @classmethod
+    def next(cls, stage):
+        order = cls.all()
+        idx = order.index(stage) if stage in order else -1
+        return order[idx + 1] if idx + 1 < len(order) else None
 
 
-def load_json(path: Path) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+# ==================== 状态管理 ====================
+def get_review_status(project_id: str) -> Dict:
+    """获取项目审核状态"""
+    status_file = OUTPUT_DIR / f"review_{project_id}.json"
+    if status_file.exists():
+        with open(status_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "project_id": project_id,
+        "current_stage": ReviewStage.SCRIPT,
+        "stages": {
+            ReviewStage.SCRIPT: {"status": "pending", "data": {}, "feedback": ""},
+            ReviewStage.STORYBOARD: {"status": "pending", "data": {}, "feedback": ""},
+            ReviewStage.KEYFRAME: {"status": "pending", "data": {}, "feedback": ""},
+            ReviewStage.VIDEO: {"status": "pending", "data": {}, "feedback": ""},
+            ReviewStage.FINAL: {"status": "pending", "data": {}, "feedback": ""},
+        },
+        "created_at": datetime.now().isoformat(),
+    }
 
 
-def save_json(path: Path, data: Dict[str, Any]) -> None:
-    tmp = str(path) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+def save_review_status(status: Dict):
+    """保存审核状态"""
+    status_file = OUTPUT_DIR / f"review_{status['project_id']}.json"
+    with open(status_file, "w", encoding="utf-8") as f:
+        json.dump(status, f, ensure_ascii=False, indent=2)
 
 
-def run_async(coro):
-    return asyncio.run(coro)
-
-
-def extract_episode_num(path: Path) -> str:
-    m = re.search(r"ep(\d+)", path.name)
-    return m.group(1) if m else "00"
-
-
-def ensure_clients():
-    if "cozex_client" not in st.session_state:
-        st.session_state.cozex_client = CozexClient()
-    if "jimeng_client" not in st.session_state:
-        st.session_state.jimeng_client = JimengVideoClient()
-
-
-def redraw_shot(flow_data: Dict[str, Any], shot_idx: int, size: str) -> Optional[str]:
-    ensure_clients()
-    shot = flow_data["shots"][shot_idx]
-    prompt = shot.get("keyframe_image_prompt", "").strip()
-    if not prompt:
-        return "Prompt 为空，无法重绘"
-
-    try:
-        result = st.session_state.cozex_client.generate_image(prompt=prompt, size=size)
-    except Exception as e:
-        return f"重绘失败: {e}"
-
-    saved_path = result.get("saved_path")
-    if saved_path:
-        shot["keyframe_image_path"] = saved_path
-
-    data_items = result.get("data") or []
-    if data_items and isinstance(data_items[0], dict):
-        image_url = data_items[0].get("url")
-        if image_url:
-            shot["keyframe_image_url"] = image_url
-
-    return None
-
-
-def launch_generation(flow_path: Path, flow_data: Dict[str, Any]) -> Optional[str]:
-    ensure_clients()
-    video_paths: List[str] = []
-
-    for idx, shot in enumerate(flow_data.get("shots", []), start=1):
-        # 已有可用视频则跳过
-        existing = shot.get("video_path")
-        if existing and os.path.exists(existing):
-            video_paths.append(existing)
-            continue
-
-        image_url = shot.get("keyframe_image_url")
-        if not image_url:
-            st.warning(f"{shot.get('shot_id', idx)} 缺少 keyframe_image_url，跳过")
-            continue
-
-        prompt = shot.get("motion_prompt") or shot.get("video_prompt") or ""
+# ==================== 项目列表 ====================
+def list_projects() -> List[Dict]:
+    """列出所有项目"""
+    projects = []
+    
+    # 从 drama_*.json 读取
+    for f in sorted(glob.glob(str(OUTPUT_DIR / "drama_*.json")), reverse=True):
         try:
-            result = run_async(
-                st.session_state.jimeng_client.image_to_video(
-                    image_url=image_url,
-                    prompt=prompt,
-                    aspect_ratio="9:16",
-                )
+            with open(f, encoding="utf-8") as fp:
+                data = json.load(fp)
+            cfg = data.get("config", {})
+            project_id = Path(f).stem.replace("drama_", "")
+            projects.append({
+                "id": project_id,
+                "topic": cfg.get("topic", "未知"),
+                "style": cfg.get("style", "-"),
+                "episodes": cfg.get("episodes", 0),
+                "created": os.path.getmtime(f),
+            })
+        except:
+            pass
+    
+    return projects
+
+
+def list_episodes(project_id: str) -> List[Dict]:
+    """列出项目下的剧集"""
+    episodes = []
+    
+    # 从 storyboard_flow_*.json 读取
+    pattern = STORYBOARD_DIR / f"storyboard_flow_ep*.json"
+    for f in sorted(glob.glob(str(pattern)), reverse=True):
+        try:
+            ep_num = int(re.search(r"ep(\d+)", f.name).group(1))
+            episodes.append({
+                "episode": ep_num,
+                "storyboard_file": str(f),
+            })
+        except:
+            pass
+    
+    return episodes
+
+
+# ==================== 阶段审核UI ====================
+
+def render_script_review(project_id: str, status: Dict):
+    """剧本审核"""
+    st.subheader("📝 剧本审核")
+    
+    # 加载剧本
+    drama_file = OUTPUT_DIR / f"drama_{project_id}.json"
+    if not drama_file.exists():
+        st.warning("未找到剧本文件")
+        return
+    
+    with open(drama_file, encoding="utf-8") as f:
+        drama_data = json.load(f)
+    
+    # 显示剧本内容
+    episodes = drama_data.get("episodes", [])
+    for ep in episodes:
+        with st.expander(f"第 {ep.get('episode_num', '?')} 集", expanded=True):
+            script = ep.get("script", "无剧本")
+            st.text_area("剧本内容", value=script, height=300, key=f"script_{ep.get('episode_num')}")
+            
+            # 审核意见
+            stage_data = status["stages"].get(ReviewStage.SCRIPT, {})
+            feedback_key = f"feedback_script_{ep.get('episode_num')}"
+            feedback = st.text_area(
+                "修改意见（可选）", 
+                value=stage_data.get("feedback", ""),
+                placeholder="如有修改意见请填写...",
+                key=feedback_key
             )
-        except Exception as e:
-            st.error(f"{shot.get('shot_id', idx)} 生成视频失败: {e}")
-            continue
+    
+    return feedback if 'feedback' in locals() else ""
 
-        video_path = result.get("video_path")
-        if video_path:
-            shot["video_path"] = video_path
-            shot["video_task_id"] = result.get("task_id", "")
-            video_paths.append(video_path)
 
-    if not video_paths:
-        return None
-
-    output_dir = ROOT / "output" / "review"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    episode_num = extract_episode_num(flow_path)
-    final_path = output_dir / f"episode_{episode_num}_review_final.mp4"
-
-    composer = VideoComposer(
-        CompositionConfig(
-            output_path=str(final_path),
-            resolution="1080x1920",
-            fps=30,
-        )
+def render_storyboard_review(project_id: str, episode: int, status: Dict):
+    """分镜审核"""
+    st.subheader("🎬 分镜审核")
+    
+    storyboard_file = STORYBOARD_DIR / f"storyboard_flow_ep{episode:02d}.json"
+    if not storyboard_file.exists():
+        st.warning("未找到分镜文件")
+        return
+    
+    with open(storyboard_file, encoding="utf-8") as f:
+        storyboard = json.load(f)
+    
+    shots = storyboard.get("shots", [])
+    st.caption(f"共 {len(shots)} 个镜头")
+    
+    # 显示分镜列表
+    for i, shot in enumerate(shots):
+        with st.expander(f"镜头 {i+1}: {shot.get('shot_id', '')} - {shot.get('shot_type', '')}"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.text_area("画面描述", value=shot.get("description", ""), height=80, key=f"sb_desc_{episode}_{i}")
+            with col2:
+                st.text_area("关键帧 Prompt", value=shot.get("keyframe_image_prompt", ""), height=80, key=f"sb_prompt_{episode}_{i}")
+            
+            # 运动提示词
+            st.text_area("运动提示词", value=shot.get("motion_prompt", ""), height=60, key=f"sb_motion_{episode}_{i}")
+            
+            # 连续性状态
+            continuity = shot.get("continuity_state", {})
+            if continuity:
+                with st.expander("连续性状态"):
+                    for k, v in continuity.items():
+                        st.text_input(k, value=v, disabled=True)
+    
+    # 审核意见
+    stage_data = status["stages"].get(ReviewStage.STORYBOARD, {})
+    feedback = st.text_area(
+        "修改意见（可选）", 
+        value=stage_data.get("feedback", ""),
+        placeholder="如有修改意见请填写...",
+        key=f"feedback_storyboard_{episode}"
     )
-
-    clips = [VideoClip(path=p) for p in video_paths if p and os.path.exists(p)]
-    if not clips:
-        return None
-
-    return composer.compose(clips)
+    
+    return feedback
 
 
-def main():
-    st.set_page_config(page_title="VideoAgent 审核台", layout="wide")
-    st.title("VideoAgent 审核界面（Streamlit）")
-
-    files = list_storyboard_files()
-    if not files:
-        st.warning("未找到分镜文件：output/storyboards/storyboard_flow_ep*.json")
-        st.stop()
-
-    options = [str(p) for p in files]
-    selected = st.selectbox("选择分镜文件", options)
-    flow_path = Path(selected)
-
-    try:
-        flow_data = load_json(flow_path)
-    except Exception as e:
-        st.error(f"读取失败: {e}")
-        st.stop()
-
-    if "shots" not in flow_data or not isinstance(flow_data["shots"], list):
-        st.error("分镜文件格式不正确，缺少 shots")
-        st.stop()
-
-    st.caption(f"共 {len(flow_data['shots'])} 个镜头")
-
-    with st.sidebar:
-        st.header("操作")
-        cols_per_row = st.slider("每行卡片数", min_value=1, max_value=4, value=2)
-        image_size = st.text_input("重绘尺寸", value=DEFAULT_SIZE)
-
-        if st.button("保存审核结果"):
-            save_json(flow_path, flow_data)
-            st.success(f"已保存：{flow_path}")
-
-        if st.button("一键发车（生成视频并合成）"):
-            with st.spinner("正在生成视频与合成，请稍候..."):
-                final_path = launch_generation(flow_path, flow_data)
-                save_json(flow_path, flow_data)
-            if final_path:
-                st.success(f"完成：{final_path}")
-                st.video(str(final_path))
-            else:
-                st.error("未生成可合成视频，请检查 keyframe_image_url / API 配置")
-
-    # 网格渲染（按行）
-    shots = flow_data["shots"]
-    for row_start in range(0, len(shots), cols_per_row):
-        row_cols = st.columns(cols_per_row)
-        for local_idx in range(cols_per_row):
-            idx = row_start + local_idx
-            if idx >= len(shots):
-                break
-            shot = shots[idx]
-            with row_cols[local_idx]:
-                st.markdown(f"**{shot.get('shot_id', f'shot-{idx+1}')} · {shot.get('shot_type', '')}**")
-                image_path = shot.get("keyframe_image_path")
-                if image_path and os.path.exists(image_path):
-                    st.image(image_path, use_container_width=True)
+def render_keyframe_review(project_id: str, episode: int, status: Dict):
+    """关键帧审核"""
+    st.subheader("🖼️ 关键帧审核")
+    
+    storyboard_file = STORYBOARD_DIR / f"storyboard_flow_ep{episode:02d}.json"
+    if not storyboard_file.exists():
+        st.warning("未找到分镜文件")
+        return
+    
+    with open(storyboard_file, encoding="utf-8") as f:
+        storyboard = json.load(f)
+    
+    shots = storyboard.get("shots", [])
+    st.caption(f"共 {len(shots)} 个镜头")
+    
+    # 网格显示
+    cols_per_row = st.slider("每行显示", 1, 4, 2)
+    
+    # 重新排列
+    rows = [shots[i:i+cols_per_row] for i in range(0, len(shots), cols_per_row)]
+    
+    feedback_parts = []
+    
+    for row in rows:
+        cols = st.columns(cols_per_row)
+        for col, shot in zip(cols, row):
+            with col:
+                shot_id = shot.get("shot_id", "")
+                shot_type = shot.get("shot_type", "")
+                
+                # 关键帧图片
+                img_path = shot.get("keyframe_image_path", "")
+                img_url = shot.get("keyframe_image_url", "")
+                
+                st.markdown(f"**{shot_id}** ({shot_type})")
+                
+                if img_path and os.path.exists(img_path):
+                    st.image(img_path, use_container_width=True)
+                elif img_url:
+                    st.image(img_url, use_container_width=True)
                 else:
-                    st.info("暂无关键帧图片")
+                    st.info("暂无图片")
+                
+                # Prompt 显示/编辑
+                prompt = shot.get("keyframe_image_prompt", "")
+                new_prompt = st.text_area(
+                    "Image Prompt", 
+                    value=prompt, 
+                    height=100,
+                    key=f"kf_prompt_{episode}_{shot_id}"
+                )
+                
+                # 标记是否需要重绘
+                if new_prompt != prompt:
+                    st.warning("⚠️ Prompt 已修改，需要重新生成")
+                    feedback_parts.append(f"{shot_id} 需要重新生成")
+                
+                # 质量评价
+                quality = st.selectbox(
+                    "质量评价",
+                    ["待评价", "✅ 优秀", "👍 良好", "👌 一般", "❌ 需重绘"],
+                    key=f"kf_quality_{episode}_{shot_id}"
+                )
+    
+    # 审核意见
+    stage_data = status["stages"].get(ReviewStage.KEYFRAME, {})
+    feedback = st.text_area(
+        "修改意见", 
+        value=stage_data.get("feedback", ""),
+        placeholder="如有修改意见请填写...",
+        key=f"feedback_keyframe_{episode}"
+    )
+    
+    return feedback
 
-                key = f"prompt_{idx}"
-                default_prompt = shot.get("keyframe_image_prompt", "")
-                new_prompt = st.text_area("Image Prompt", value=default_prompt, key=key, height=120)
-                if new_prompt != default_prompt:
-                    shot["keyframe_image_prompt"] = new_prompt
 
-                if st.button("重绘本帧", key=f"redraw_{idx}"):
-                    err = redraw_shot(flow_data, idx, image_size)
-                    if err:
-                        st.error(err)
-                    else:
-                        st.success("重绘完成")
-                        st.rerun()
+def render_video_review(project_id: str, episode: int, status: Dict):
+    """视频审核"""
+    st.subheader("🎥 视频审核")
+    
+    storyboard_file = STORYBOARD_DIR / f"storyboard_flow_ep{episode:02d}.json"
+    if not storyboard_file.exists():
+        st.warning("未找到分镜文件")
+        return
+    
+    with open(storyboard_file, encoding="utf-8") as f:
+        storyboard = json.load(f)
+    
+    shots = storyboard.get("shots", [])
+    
+    # 查找已有视频
+    videos = []
+    for shot in shots:
+        video_path = shot.get("video_path", "")
+        if video_path and os.path.exists(video_path):
+            videos.append({
+                "shot_id": shot.get("shot_id"),
+                "path": video_path,
+                "method": shot.get("video_method", "unknown"),
+                "quality": shot.get("video_quality_score", 0),
+            })
+    
+    st.caption(f"共 {len(videos)} 个视频片段")
+    
+    # 显示视频
+    for video in videos:
+        with st.expander(f"视频: {video['shot_id']} ({video['method']})"):
+            st.video(video["path"])
+            st.caption(f"质量分数: {video['quality']:.2f}")
+            
+            # 质量评价
+            quality = st.selectbox(
+                "质量评价",
+                ["待评价", "✅ 优秀", "👍 良好", "👌 一般", "❌ 需重绘"],
+                key=f"vid_quality_{episode}_{video['shot_id']}"
+            )
+    
+    # ==================== 智能剪辑功能 ====================
+    st.markdown("---")
+    st.markdown("### ✂️ 智能剪辑分析")
+    
+    # 选择要分析的视频
+    all_videos = []
+    for shot in shots:
+        path = shot.get("video_path", "")
+        if path and os.path.exists(path):
+            all_videos.append((shot.get("shot_id"), path))
+    
+    if not all_videos:
+        st.info("暂无视频可供分析")
+    else:
+        # 视频选择
+        video_options = [f"{sid}: {os.path.basename(p)}" for sid, p in all_videos]
+        selected_video_idx = st.selectbox("选择视频进行剪辑分析", range(len(video_options)), format_func=lambda x: video_options[x])
+        selected_shot_id, selected_video_path = all_videos[selected_video_idx]
+        
+        # 分析按钮
+        col1, col2 = st.columns([1, 3])
+        
+        with col1:
+            if st.button("🔍 分析剪辑点", type="primary"):
+                with st.spinner("分析中..."):
+                    # 导入智能剪辑模块
+                    try:
+                        import sys
+                        sys.path.insert(0, str(ROOT))
+                        from src.smart_video_clipper import SmartVideoClipper
+                        
+                        clipper = SmartVideoClipper(output_dir=str(OUTPUT_DIR / "clips"))
+                        
+                        # 同步转异步
+                        import asyncio
+                        result = asyncio.run(clipper.analyze_video(selected_video_path))
+                        
+                        # 保存分析结果
+                        analysis_file = OUTPUT_DIR / "clips" / f"analysis_{episode}_{selected_shot_id}.json"
+                        with open(analysis_file, "w", encoding="utf-8") as f:
+                            json.dump({
+                                "video_path": result.video_path,
+                                "duration": result.duration,
+                                "resolution": result.resolution,
+                                "fps": result.fps,
+                                "scenes": [
+                                    {
+                                        "start": s.start_time,
+                                        "end": s.end_time,
+                                        "duration": s.duration,
+                                        "type": s.scene_type,
+                                        "importance": s.importance
+                                    } for s in result.scenes
+                                ],
+                                "edit_points": [
+                                    {
+                                        "time": ep.time,
+                                        "type": ep.type,
+                                        "reason": ep.reason
+                                    } for ep in result.edit_points
+                                ],
+                                "summary": result.summary
+                            }, f, ensure_ascii=False, indent=2)
+                        
+                        st.session_state["clip_analysis"] = result
+                        st.success("分析完成！")
+                        
+                    except Exception as e:
+                        st.error(f"分析失败: {e}")
+        
+        # 显示分析结果
+        if "clip_analysis" in st.session_state:
+            result = st.session_state["clip_analysis"]
+            
+            with col2:
+                st.info(f"⏱️ 时长: {result.duration:.1f}s | 📐 {result.resolution} | 🎬 {result.fps}fps")
+            
+            # 场景列表
+            if result.scenes:
+                st.markdown("#### 🎬 场景片段")
+                for i, scene in enumerate(result.scenes):
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    with col1:
+                        st.caption(f"场景 {i+1}")
+                    with col2:
+                        st.caption(f"{scene.start_time:.1f}s → {scene.end_time:.1f}s ({scene.duration:.1f}s)")
+                    with col3:
+                        st.caption(f"类型: {scene.scene_type}")
+            
+            # 剪辑点
+            if result.edit_points:
+                st.markdown("#### ✂️ 剪辑点")
+                for ep in result.edit_points:
+                    icon = {"cut": "✂️", "dissolve": "🌫️", "fade": "🔗"}.get(ep.type, "📍")
+                    st.markdown(f"- **{icon} {ep.time:.2f}s** - {ep.type} ({ep.reason})")
+            
+            # 建议
+            if result.summary:
+                st.success(f"💡 {result.summary}")
+            
+            # 导出 EDL
+            try:
+                from src.smart_video_clipper import SmartVideoClipper
+                clipper = SmartVideoClipper(output_dir=str(OUTPUT_DIR / "clips"))
+                edl_path = clipper.export_edl(result.edit_points, str(OUTPUT_DIR / "clips" / f"edit_{episode}.edl"))
+                st.download_button("📥 导出 EDL", open(edl_path, "rb"), file_name=f"edit_{episode}.edl")
+            except:
+                pass
+    
+    # 合成视频
+    composed_files = list(FINAL_DIR.glob(f"episode_{episode:02d}*.mp4"))
+    if composed_files:
+        st.markdown("---")
+        st.markdown("### 合成视频")
+        for f in composed_files:
+            st.video(str(f))
+    
+    # 审核意见
+    stage_data = status["stages"].get(ReviewStage.VIDEO, {})
+    feedback = st.text_area(
+        "修改意见", 
+        value=stage_data.get("feedback", ""),
+        placeholder="如有修改意见请填写...",
+        key=f"feedback_video_{episode}"
+    )
+    
+    return feedback
+
+
+def render_final_review(project_id: str, episode: int, status: Dict):
+    """成片审核"""
+    st.subheader("✅ 成片审核")
+    
+    # 查找最终视频
+    final_files = list(FINAL_DIR.glob(f"episode_{episode:02d}*.mp4"))
+    
+    if not final_files:
+        # 也检查 output 目录
+        final_files = list(OUTPUT_DIR.glob(f"episode_{episode:02d}*.mp4"))
+    
+    if not final_files:
+        st.warning("未找到最终视频")
+        return
+    
+    # 显示最终视频
+    for f in final_files:
+        st.video(str(f))
+        
+        # 文件信息
+        size_mb = os.path.getsize(f) / 1024 / 1024
+        st.caption(f"文件大小: {size_mb:.1f} MB")
+    
+    # 配音
+    audio_files = list(AUDIO_DIR.glob(f"ep{episode:02d}*voiceover*.mp3"))
+    if audio_files:
+        st.markdown("### 🎤 配音")
+        for audio in audio_files:
+            st.audio(str(audio))
+    
+    # 字幕
+    subtitle_files = list(SUBTITLE_DIR.glob(f"ep{episode:02d}*.srt"))
+    if subtitle_files:
+        st.markdown("### 📝 字幕")
+        for sub in subtitle_files:
+            with open(sub, encoding="utf-8") as f:
+                content = f.read()
+            st.text_area("字幕内容", value=content, height=200, disabled=True)
+    
+    # 审核意见
+    stage_data = status["stages"].get(ReviewStage.FINAL, {})
+    feedback = st.text_area(
+        "修改意见", 
+        value=stage_data.get("feedback", ""),
+        placeholder="如有修改意见请填写...",
+        key=f"feedback_final_{episode}"
+    )
+    
+    return feedback
+
+
+# ==================== 主界面 ====================
+def main():
+    st.title("🎬 AI短剧审核中心")
+    st.markdown("---")
+    
+    # 侧边栏：项目选择
+    with st.sidebar:
+        st.header("项目选择")
+        
+        projects = list_projects()
+        if not projects:
+            st.warning("暂无项目，请先生成短剧")
+            return
+        
+        project_options = [f"{p['topic']} ({p['episodes']}集)" for p in projects]
+        selected_idx = st.selectbox("选择项目", range(len(project_options)), format_func=lambda x: project_options[x])
+        
+        selected_project = projects[selected_idx]
+        project_id = selected_project["id"]
+        
+        st.divider()
+        
+        # 剧集选择
+        episodes = list_episodes(project_id)
+        if not episodes:
+            st.warning("暂无剧集")
+            return
+        
+        episode_options = [f"第 {ep['episode']} 集" for ep in episodes]
+        ep_idx = st.selectbox("选择剧集", range(len(episode_options)), format_func=lambda x: episode_options[x])
+        selected_episode = episodes[ep_idx]["episode"]
+        
+        st.divider()
+        
+        # 审核状态
+        st.header("审核状态")
+        status = get_review_status(project_id)
+        
+        # 显示各阶段状态
+        for stage in ReviewStage.all():
+            stage_info = status["stages"].get(stage, {})
+            stage_status = stage_info.get("status", "pending")
+            label = ReviewStage.label(stage)
+            
+            if stage_status == "approved":
+                st.success(f"✅ {label}")
+            elif stage_status == "rejected":
+                st.error(f"❌ {label}")
+            elif stage_status == "in_progress":
+                st.warning(f"🔄 {label}")
+            else:
+                st.info(f"⏳ {label}")
+        
+        # 当前阶段
+        current = status.get("current_stage", ReviewStage.SCRIPT)
+        st.divider()
+        st.markdown(f"**当前阶段:** {ReviewStage.label(current)}")
+    
+    # 主内容区
+    st.header(f"审核: {selected_project['topic']} - 第 {selected_episode} 集")
+    
+    # 阶段选择器
+    tab_names = [ReviewStage.label(s) for s in ReviewStage.all()]
+    tabs = st.tabs(tab_names)
+    
+    # 当前阶段
+    current_stage = status.get("current_stage", ReviewStage.SCRIPT)
+    current_idx = ReviewStage.all().index(current_stage) if current_stage in ReviewStage.all() else 0
+    
+    # 渲染各阶段
+    for i, (tab, stage) in enumerate(zip(tabs, ReviewStage.all())):
+        with tab:
+            # 根据阶段渲染不同内容
+            if stage == ReviewStage.SCRIPT:
+                feedback = render_script_review(project_id, status)
+            elif stage == ReviewStage.STORYBOARD:
+                feedback = render_storyboard_review(project_id, selected_episode, status)
+            elif stage == ReviewStage.KEYFRAME:
+                feedback = render_keyframe_review(project_id, selected_episode, status)
+            elif stage == ReviewStage.VIDEO:
+                feedback = render_video_review(project_id, selected_episode, status)
+            elif stage == ReviewStage.FINAL:
+                feedback = render_final_review(project_id, selected_episode, status)
+    
+    st.markdown("---")
+    
+    # 审核操作区
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        st.info("💡 选择阶段后，点击下方按钮进行审核")
+    
+    with col2:
+        if st.button("❌ 打回修改", type="secondary", use_container_width=True):
+            # 保存反馈
+            stage_data = status["stages"].get(current_stage, {})
+            stage_data["status"] = "rejected"
+            stage_data["feedback"] = feedback if 'feedback' in locals() else ""
+            stage_data["rejected_at"] = datetime.now().isoformat()
+            status["stages"][current_stage] = stage_data
+            
+            # 更新状态文件（供主流程读取）
+            review_status_file = STORYBOARD_DIR / f"review_status_ep{selected_episode:02d}.json"
+            with open(review_status_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "status": "rejected",
+                    "stage": current_stage,
+                    "feedback": stage_data["feedback"],
+                    "rejected_at": datetime.now().isoformat()
+                }, f, ensure_ascii=False, indent=2)
+            
+            save_review_status(status)
+            st.warning(f"已打回修改，请填写反馈意见")
+            st.rerun()
+    
+    with col3:
+        if st.button("✅ 通过审核", type="primary", use_container_width=True):
+            # 保存状态
+            stage_data = status["stages"].get(current_stage, {})
+            stage_data["status"] = "approved"
+            stage_data["approved_at"] = datetime.now().isoformat()
+            status["stages"][current_stage] = stage_data
+            
+            # 推进到下一阶段
+            next_stage = ReviewStage.next(current_stage)
+            if next_stage:
+                status["current_stage"] = next_stage
+                status["stages"][next_stage]["status"] = "in_progress"
+            
+            # 更新状态文件（供主流程读取）
+            review_status_file = STORYBOARD_DIR / f"review_status_ep{selected_episode:02d}.json"
+            with open(review_status_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "status": "approved",
+                    "stage": current_stage,
+                    "approved_at": datetime.now().isoformat()
+                }, f, ensure_ascii=False, indent=2)
+            
+            save_review_status(status)
+            st.success(f"已通过审核，进入下一阶段")
+            st.rerun()
 
 
 if __name__ == "__main__":

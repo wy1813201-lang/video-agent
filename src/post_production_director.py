@@ -19,6 +19,7 @@ import json
 import os
 import shlex
 import subprocess
+import hashlib
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -55,6 +56,7 @@ class TimelineItem:
     end: float
     duration: float
     emotion: str
+    speaker: str
     dialogue: str
     rhythm: str
 
@@ -62,8 +64,13 @@ class TimelineItem:
 @dataclass
 class VoicePlanItem:
     shot_id: str
+    speaker: str
+    voice: str
     text: str
     emotion: str
+    start: float
+    end: float
+    max_duration: float
     speed: float
     pause_after: float
     volume: float
@@ -105,7 +112,11 @@ class PostProductionDirector:
         timeline_path = str(pp_dir / "timeline.json")
         self._save_json(timeline_path, [asdict(x) for x in timeline])
 
-        voice_plan = self._generate_voice_plan(timeline)
+        voice_casting = self._build_voice_casting(timeline)
+        voice_casting_path = str(pp_dir / "voice_casting.json")
+        self._save_json(voice_casting_path, voice_casting)
+
+        voice_plan = self._generate_voice_plan(timeline, voice_casting)
         voice_plan_path = str(pp_dir / "voice_plan.json")
         self._save_json(voice_plan_path, [asdict(x) for x in voice_plan])
 
@@ -137,6 +148,7 @@ class PostProductionDirector:
 
         return {
             "timeline_path": timeline_path,
+            "voice_casting_path": voice_casting_path,
             "voice_plan_path": voice_plan_path,
             "music_plan_path": music_plan_path,
             "voice_track_path": voice_track_path,
@@ -159,7 +171,7 @@ class PostProductionDirector:
         clip_paths: List[str],
         emotion_tags: Optional[List[str]],
     ) -> List[TimelineItem]:
-        shots = storyboard.get("shots", []) if storyboard else []
+        shots = self._collect_storyboard_shots(storyboard)
         dialogues = self._extract_dialogues(script_text)
         timeline: List[TimelineItem] = []
         cursor = 0.0
@@ -174,7 +186,9 @@ class PostProductionDirector:
 
             duration = self._probe_duration(clip) if os.path.exists(clip) else 5.0
             rhythm = self._infer_rhythm(duration)
-            dialogue = dialogues[idx] if idx < len(dialogues) else ""
+            dialogue_item = dialogues[idx] if idx < len(dialogues) else {"speaker": "旁白", "text": ""}
+            speaker = dialogue_item.get("speaker", "旁白")
+            dialogue = dialogue_item.get("text", "")
 
             item = TimelineItem(
                 shot_id=shot_id,
@@ -183,6 +197,7 @@ class PostProductionDirector:
                 end=round(cursor + duration, 3),
                 duration=round(duration, 3),
                 emotion=emotion,
+                speaker=speaker,
                 dialogue=dialogue,
                 rhythm=rhythm,
             )
@@ -191,8 +206,21 @@ class PostProductionDirector:
 
         return timeline
 
-    def _extract_dialogues(self, script_text: str) -> List[str]:
-        lines = []
+    def _collect_storyboard_shots(self, storyboard: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """兼容两种格式：StoryboardFlow(shots) 与 SOP 嵌套(scenes[].shots[])。"""
+        if not storyboard:
+            return []
+        if isinstance(storyboard.get("shots"), list):
+            return storyboard["shots"]
+        if isinstance(storyboard.get("scenes"), list):
+            merged: List[Dict[str, Any]] = []
+            for scene in storyboard.get("scenes", []):
+                merged.extend(scene.get("shots", []) or [])
+            return merged
+        return []
+
+    def _extract_dialogues(self, script_text: str) -> List[Dict[str, str]]:
+        lines: List[Dict[str, str]] = []
         for raw in (script_text or "").splitlines():
             s = raw.strip()
             if not s:
@@ -202,7 +230,10 @@ class PostProductionDirector:
             if ":" in s or "：" in s:
                 parts = s.replace("：", ":", 1).split(":", 1)
                 if len(parts) == 2 and parts[1].strip():
-                    lines.append(parts[1].strip())
+                    lines.append({
+                        "speaker": parts[0].strip() or "旁白",
+                        "text": parts[1].strip(),
+                    })
         return lines
 
     def _normalize_emotion(self, scene_emotion: str) -> str:
@@ -223,19 +254,54 @@ class PostProductionDirector:
             return "ambient"
         return "narrative"
 
-    def _generate_voice_plan(self, timeline: List[TimelineItem]) -> List[VoicePlanItem]:
+    def _build_voice_casting(self, timeline: List[TimelineItem]) -> Dict[str, str]:
+        """为每个角色分配固定音色，保证跨镜头说话一致。"""
+        explicit = self.tts_cfg.get("character_voice_map", {}) or {}
+        cast: Dict[str, str] = {}
+        for item in timeline:
+            speaker = (item.speaker or "旁白").strip()
+            if speaker in cast:
+                continue
+            if speaker in explicit:
+                cast[speaker] = self._normalize_edge_voice(str(explicit[speaker]))
+            else:
+                cast[speaker] = self._pick_voice_for_speaker(speaker)
+        if "旁白" not in cast:
+            cast["旁白"] = self._normalize_edge_voice(self.tts_cfg.get("voice", "zh-CN-XiaoxiaoNeural"))
+        return cast
+
+    def _pick_voice_for_speaker(self, speaker: str) -> str:
+        """基于角色名稳定分配音色（同名恒定）。"""
+        bank = ["xiaoxiao", "xiaoyi", "yunxi", "yunjian", "yunyang", "xiaobei"]
+        if not speaker:
+            return "xiaoxiao"
+        idx = sum(ord(c) for c in speaker) % len(bank)
+        return bank[idx]
+
+    def _generate_voice_plan(
+        self,
+        timeline: List[TimelineItem],
+        voice_casting: Dict[str, str],
+    ) -> List[VoicePlanItem]:
         plan: List[VoicePlanItem] = []
         for item in timeline:
             emotion = item.emotion
             speed = EMOTION_SPEED_MAP.get(emotion, 0.95)
-            pause = 0.35 if item.rhythm == "tension" else 0.5
+            pause = 0.15 if item.rhythm == "tension" else 0.25
             volume = 1.0 if emotion in ("epic", "tension") else 0.9
             text = item.dialogue or " "
+            speaker = item.speaker or "旁白"
+            voice = voice_casting.get(speaker, "xiaoxiao")
             plan.append(
                 VoicePlanItem(
                     shot_id=item.shot_id,
+                    speaker=speaker,
+                    voice=voice,
                     text=text,
                     emotion=emotion,
+                    start=item.start,
+                    end=item.end,
+                    max_duration=item.duration,
                     speed=speed,
                     pause_after=pause,
                     volume=volume,
@@ -295,27 +361,41 @@ class PostProductionDirector:
 
         engine = self.tts_cfg.get("provider", "edge_tts")
         engine = "edge" if "edge" in engine else "edge"
-        voice_raw = self.tts_cfg.get("voice", "zh-CN-XiaoxiaoNeural")
-        voice = self._normalize_edge_voice(voice_raw)
 
         segment_paths: List[str] = []
+        cache_dir = Path(self.tts_cfg.get("cache_dir", "data/tts_cache"))
+        cache_dir.mkdir(parents=True, exist_ok=True)
         for i, item in enumerate(voice_plan, 1):
             if not item.text.strip():
                 continue
             rate = self._speed_to_edge_rate(item.speed)
-            seg_mp3 = pp_dir / f"voice_seg_{i:03d}.mp3"
-            generated = self.voice_selector.generate(
-                text=item.text,
-                output_path=str(seg_mp3),
-                engine=engine,
-                voice=voice,
-                rate=rate,
-            )
+            cache_key = hashlib.sha1(f"{item.voice}|{rate}|{item.text}".encode("utf-8")).hexdigest()[:16]
+            seg_mp3 = cache_dir / f"{cache_key}.mp3"
+            if not seg_mp3.exists():
+                generated = self.voice_selector.generate(
+                    text=item.text,
+                    output_path=str(seg_mp3),
+                    engine=engine,
+                    voice=item.voice,
+                    rate=rate,
+                )
+            else:
+                generated = str(seg_mp3)
             if not generated or not os.path.exists(generated):
                 continue
-            segment_paths.append(generated)
+            # 强制单条语音不超过镜头时长，避免口型和镜头错位。
+            max_len = max(0.3, item.max_duration - 0.05)
+            seg_duration = self._probe_audio_duration(generated)
+            final_seg = generated
+            if seg_duration > max_len:
+                trimmed = pp_dir / f"voice_seg_{i:03d}_trim.wav"
+                if self._trim_audio(generated, str(trimmed), max_len):
+                    final_seg = str(trimmed)
+                    seg_duration = self._probe_audio_duration(final_seg)
+            segment_paths.append(final_seg)
 
-            silence = self._make_silence(pp_dir, seconds=item.pause_after, name=f"pause_{i:03d}.wav")
+            remaining = max(0.0, item.max_duration - seg_duration)
+            silence = self._make_silence(pp_dir, seconds=remaining, name=f"pause_{i:03d}.wav")
             if silence:
                 segment_paths.append(silence)
 
@@ -342,6 +422,8 @@ class PostProductionDirector:
             "zh-cn-yunxineural": "yunxi",
             "zh-cn-yunjianneural": "yunjian",
             "zh-cn-xiaoyineural": "xiaoyi",
+            "zh-cn-yunyangneural": "yunyang",
+            "zh-cn-liaoning-xiaobeineural": "xiaobei",
         }
         key = voice_raw.strip().lower()
         return mapping.get(key, voice_raw)
@@ -361,6 +443,27 @@ class PostProductionDirector:
             "anullsrc=r=44100:cl=mono", "-t", str(round(seconds, 3)), str(out),
         ]
         return str(out) if self._run_ffmpeg(cmd) else None
+
+    def _probe_audio_duration(self, audio_path: str) -> float:
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", audio_path,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout or "{}")
+            return float(data.get("format", {}).get("duration", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def _trim_audio(self, input_path: str, output_path: str, max_duration: float) -> bool:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-t", str(round(max_duration, 3)),
+            "-ac", "1", "-ar", "44100",
+            output_path,
+        ]
+        return self._run_ffmpeg(cmd)
 
     def _render_music_track(self, music_plan: List[MusicPlanItem], pp_dir: Path, total_duration: float) -> Optional[str]:
         if not music_plan or total_duration <= 0:

@@ -65,14 +65,19 @@ class StoryboardFlowManager:
         mgr.generate_videos(flow, video_fn)       # STEP2: 批量生成视频
     """
 
-    def __init__(self, script: str, use_gemini: bool = False, visual_style_profile: str = "anime"):
+    def __init__(self, script: str, use_gemini: bool = False, visual_style_profile: str = "anime", character_registry=None):
         self.script = script
         self.use_gemini = use_gemini
         self.visual_style_profile = visual_style_profile
+        self.character_registry = character_registry  # 角色母版注册表
 
     def build(self) -> StoryboardFlow:
         """解析剧本，生成所有分镜及两步 prompt"""
-        agent = FilmDirectorAgent(self.script, visual_style_profile=self.visual_style_profile)
+        agent = FilmDirectorAgent(
+            self.script, 
+            visual_style_profile=self.visual_style_profile,
+            character_registry=self.character_registry  # 传递角色注册表
+        )
         raw = agent.run(use_gemini=self.use_gemini)
 
         flow = StoryboardFlow(
