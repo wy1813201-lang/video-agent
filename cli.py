@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from src.workflow_manager import WorkflowManager, Stage
+from src.efficient_pipeline import EfficientPipeline
 
 
 def build_config(api_config: dict, topic: str, style: str, episodes: int):
@@ -55,6 +56,17 @@ def load_api_config() -> dict:
 
 def notify(msg: str):
     print(f"\n{'='*55}\n{msg}\n{'='*55}")
+
+
+def print_efficient_summary(result: dict):
+    print("\n⚡ Efficient 5.0 最小链路结果")
+    print(f"  会话ID: {result.get('session_id', '')}")
+    print(f"  角色数: {result.get('character_count', 0)}")
+    print(f"  场景数: {result.get('storyboard_scene_count', 0)}")
+    print(f"  关键帧数: {result.get('keyframe_count', 0)}")
+    print(f"  视频片段数: {result.get('video_count', 0)}")
+    print(f"  最终视频: {result.get('final_video', '') or '未产出'}")
+    print(f"  记录文件: {result.get('record_path', '')}")
 
 
 async def run_step_script(manager: WorkflowManager, config):
@@ -170,6 +182,12 @@ async def main():
         default="all",
         help="执行指定阶段（默认: all — 全流程）",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["sop", "efficient"],
+        default="sop",
+        help="执行模式：sop=原 7 阶段流程；efficient=5.0 最小落地链路",
+    )
     parser.add_argument("--topic", "-t", default="重生千金复仇记", help="剧本主题")
     parser.add_argument("--style", default="情感", help="剧本风格")
     parser.add_argument("--episodes", "-e", type=int, default=3, help="集数")
@@ -184,7 +202,15 @@ async def main():
     config = build_config(api_config, args.topic, args.style, args.episodes)
     manager = WorkflowManager(notify_callback=notify)
 
-    notify(f"🚀 AI 短剧 SOP 工作流  |  主题: {args.topic}  |  模式: {args.step}")
+    notify(f"🚀 AI 短剧工作流  |  主题: {args.topic}  |  step: {args.step}  |  mode: {args.mode}")
+
+    if args.mode == "efficient":
+        if args.step != "all":
+            raise SystemExit("efficient 模式当前只支持 --step all；先把最小闭环跑通，别上来就拆碎。")
+        pipeline = EfficientPipeline()
+        result = await pipeline.run_minimal_v5(manager, config)
+        print_efficient_summary(result)
+        return
 
     if args.step == "all":
         final = await manager.run_workflow(config)

@@ -60,6 +60,11 @@ except ImportError:
     JimengVideoClient = None
 
 try:
+    from src.image_url_bridge import ImageUrlBridge
+except ImportError:
+    ImageUrlBridge = None
+
+try:
     from src.post_production_director import PostProductionDirector
 except ImportError:
     PostProductionDirector = None
@@ -257,6 +262,8 @@ class ShortDramaAutomator:
                 self.jimeng_clients.append(JimengVideoClient())
         self._jimeng_rr_index = 0
         self.jimeng_client = self.jimeng_clients[0] if self.jimeng_clients else None
+        bridge_cfg = video_cfg_api.get("image_url_bridge", {})
+        self.image_url_bridge = ImageUrlBridge(config=bridge_cfg) if ImageUrlBridge else None
         self.post_director = PostProductionDirector(self.app_config) if (
             self._enable_post_production_director and PostProductionDirector
         ) else None
@@ -657,6 +664,15 @@ class ShortDramaAutomator:
             "generated_shots": generated,
         }
 
+    def _ensure_public_image_url(self, image_path_or_url: str) -> str:
+        if not image_path_or_url:
+            return ""
+        if image_path_or_url.startswith(("http://", "https://")):
+            return image_path_or_url
+        if not self.image_url_bridge:
+            raise RuntimeError("image_url_bridge unavailable")
+        return self.image_url_bridge.ensure_public_url(image_path_or_url)
+
     async def _generate_video_for_shot(self, shot):
         """
         根据配置选择 i2v/t2v/auto 生成视频，并支持 i2v -> t2v fallback。
@@ -696,8 +712,14 @@ class ShortDramaAutomator:
 
         # primary i2v / auto(i2v first)
         if method in ("i2v", "auto"):
+            if not getattr(shot, "keyframe_image_url", None) and getattr(shot, "keyframe_image_path", None):
+                try:
+                    shot.keyframe_image_url = self._ensure_public_image_url(shot.keyframe_image_path)
+                except Exception as e:
+                    fallback_reason = f"image_url_bridge_error:{e}"
+
             if not getattr(shot, "keyframe_image_url", None):
-                fallback_reason = "missing_keyframe_url"
+                fallback_reason = fallback_reason or "missing_keyframe_url"
             else:
                 try:
                     client = self._next_jimeng_client()

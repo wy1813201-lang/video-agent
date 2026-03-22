@@ -12,6 +12,7 @@
 
 import json
 import os
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, asdict
@@ -448,6 +449,128 @@ class EfficientPipeline:
             json.dump(self.current_session, f, ensure_ascii=False, indent=2)
 
         print(f"\n[Pipeline] 会话记录已保存: {path}")
+        return path
+
+    async def run_minimal_v5(self, workflow_manager, config) -> Dict[str, Any]:
+        """
+        最小可落地 5.0 链路：
+        1) 连续生成 3 份剧本并按内置规则评分
+        2) 选择最高分剧本
+        3) 基于 WorkflowManager 串联角色 / 分镜 / 关键帧 / 视频 / 合成
+
+        说明：
+        - 这是“先跑通”的实现，不引入新的重型抽象
+        - 保留旧 EfficientPipeline API，不破坏已有测试/脚本
+        - 若图像或视频阶段未配置，允许返回空产物，但会落盘会话记录
+        """
+        topic = getattr(config, "topic", "短剧")
+        self.start_session(topic)
+
+        print("\n" + "=" * 60)
+        print("5.0 最小落地链路启动")
+        print("=" * 60)
+
+        candidates: List[ScriptCandidate] = []
+        for i in range(3):
+            print(f"\n[{i+1}/3] 生成剧本候选...")
+            script = await workflow_manager.generate_script(config)
+            score_data = self._score_script(script)
+            candidate = ScriptCandidate(
+                script_id=f"script_{i+1}",
+                content=script,
+                score=score_data["overall"],
+                dimensions=score_data["dimensions"],
+                timestamp=datetime.now().isoformat(),
+            )
+            candidates.append(candidate)
+            print(f"   总分: {candidate.score:.1f}/10")
+            print(f"   Hook: {candidate.dimensions['hook_strength']:.1f}")
+            print(f"   剧情: {candidate.dimensions['plot_structure']:.1f}")
+            print(f"   情绪: {candidate.dimensions['emotion_rhythm']:.1f}")
+
+        best_candidate = max(candidates, key=lambda x: x.score)
+        self.current_session["script_candidates"] = [asdict(c) for c in candidates]
+        self.current_session["selected_script"] = asdict(best_candidate)
+        workflow_manager.state.script = best_candidate.content
+
+        print(f"\n✓ 选中剧本: {best_candidate.script_id} ({best_candidate.score:.1f}/10)")
+
+        characters = await workflow_manager.build_character_masters(best_candidate.content, config)
+        workflow_manager.state.character_masters = characters
+        self.current_session["characters"] = [
+            {
+                "character_id": getattr(c, "character_id", ""),
+                "name": getattr(c, "name", ""),
+                "role_in_story": getattr(c, "role_in_story", ""),
+            }
+            for c in characters
+        ]
+        self.current_session["character_approved"] = True
+
+        storyboard = await workflow_manager.generate_storyboard(best_candidate.content, characters)
+        workflow_manager.state.storyboard = storyboard
+
+        keyframes = await workflow_manager.generate_all_keyframes(storyboard, characters)
+        workflow_manager.state.keyframes = keyframes
+        workflow_manager.state.images = [p for p in keyframes.values() if p]
+
+        videos: List[str] = []
+        video_prompts: Dict[str, str] = {}
+        for scene in storyboard.get("scenes", []):
+            for shot in scene.get("shots", []):
+                shot_id = shot.get("shot_id", "")
+                if shot_id:
+                    video_prompts[shot_id] = shot.get("motion_prompt") or shot.get("video_prompt", "")
+
+        for shot_id, image_path in keyframes.items():
+            if not image_path or not Path(image_path).exists():
+                print(f"⚠️ 跳过视频生成 [{shot_id}]：关键帧不存在")
+                continue
+            try:
+                video_path = await workflow_manager.generate_video(
+                    image_path,
+                    video_prompts.get(shot_id, ""),
+                )
+            except Exception as exc:
+                print(f"⚠️ 视频生成失败 [{shot_id}]: {exc}")
+                video_path = ""
+            if video_path:
+                videos.append(video_path)
+
+        workflow_manager.state.videos = videos
+        final_video = await workflow_manager.assemble_videos(videos)
+
+        final_versions = [
+            asdict(
+                FinalVersion(
+                    version_id="minimal_v5",
+                    video_path=final_video,
+                    quality_score=1.0 if final_video else 0.0,
+                    params={
+                        "mode": "efficient",
+                        "strategy": "minimal_v5",
+                        "video_count": len(videos),
+                        "keyframe_count": len(keyframes),
+                    },
+                    selected=bool(final_video),
+                    selection_reason="自动落地的最小可跑版本",
+                )
+            )
+        ]
+        self.current_session["final_versions"] = final_versions
+        self.current_session["published_version"] = final_versions[0] if final_versions else None
+
+        record_path = self.save_session()
+        return {
+            "session_id": self.current_session["session_id"],
+            "selected_script": asdict(best_candidate),
+            "character_count": len(characters),
+            "storyboard_scene_count": len(storyboard.get("scenes", [])),
+            "keyframe_count": len(keyframes),
+            "video_count": len(videos),
+            "final_video": final_video,
+            "record_path": record_path,
+        }
 
     def get_session_summary(self) -> str:
         """获取会话摘要"""

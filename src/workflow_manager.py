@@ -14,6 +14,19 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Dict, Any
 from datetime import datetime
 
+try:
+    from .image_url_bridge import ImageUrlBridge
+except ImportError:
+    from image_url_bridge import ImageUrlBridge
+
+try:
+    from .jimeng_client import JimengVideoClient
+except Exception:
+    try:
+        from jimeng_client import JimengVideoClient
+    except Exception:
+        JimengVideoClient = None
+
 # 确保 src 目录在路径中
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -92,6 +105,8 @@ class WorkflowManager:
         self.paused = False
         self._approval_event = asyncio.Event()
         self.api_config = self._load_config()
+        bridge_cfg = self.api_config.get("video", {}).get("jimeng", {}).get("image_url_bridge", {})
+        self.image_url_bridge = ImageUrlBridge(config=bridge_cfg)
 
     def _load_config(self) -> dict:
         """读取并返回 API 配置，供各方法复用"""
@@ -590,6 +605,10 @@ class WorkflowManager:
         self.notify(f"🖼️ 图像已保存: {img_path.name}")
         return str(img_path)
 
+    def _ensure_jimeng_image_url(self, image_path_or_url: str) -> str:
+        """把本地关键帧桥接为公网 URL；公网 URL 原样返回。"""
+        return self.image_url_bridge.ensure_public_url(image_path_or_url)
+
     async def generate_video(self, image_path: str, motion_prompt: str = ""):
         """
         生成视频 - 支持 Cozex API
@@ -614,14 +633,12 @@ class WorkflowManager:
             )
 
         # SOP 优先走 Jimeng i2v（真图生视频），确保角色与关键帧绑定。
-        try:
-            from .jimeng_client import JimengVideoClient
-        except ImportError:
-            from jimeng_client import JimengVideoClient
-
         video_cfg_jimeng = self.api_config.get("video", {}).get("jimeng", {})
         if not video_cfg_jimeng.get("enabled"):
             self.notify("⚠️ Jimeng 未启用，跳过 i2v 视频生成")
+            return ""
+        if JimengVideoClient is None:
+            self.notify("⚠️ Jimeng SDK 不可用，跳过 i2v 视频生成")
             return ""
 
         client = JimengVideoClient()
@@ -645,28 +662,29 @@ class WorkflowManager:
             )
 
         resolution = video_cfg_jimeng.get("default_resolution", "720p")
-        # Jimeng i2v 需要公网 URL。若是本地路径，落地 pending 状态供上传后重跑。
-        if image_path.startswith("http://") or image_path.startswith("https://"):
-            result = await client.image_to_video(
-                image_url=image_path,
-                prompt=prompt,
-                aspect_ratio="9:16",
-            )
-        else:
+        try:
+            image_url = self._ensure_jimeng_image_url(image_path)
+        except Exception as e:
             status_dir = Path("output/video_generation")
             status_dir.mkdir(parents=True, exist_ok=True)
             status_path = status_dir / f"pending_i2v_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             status_payload = {
                 "stage": "视频生成",
                 "status": "pending",
-                "reason": "Jimeng i2v 需要公网可访问 image_url，当前为本地路径",
+                "reason": f"Jimeng i2v image_url bridge failed: {e}",
                 "input_image": image_path,
                 "motion_prompt": motion_prompt,
                 "resolution": resolution,
             }
             status_path.write_text(json.dumps(status_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.notify(f"⚠️ i2v 待处理（缺少公网URL）: {status_path}")
+            self.notify(f"⚠️ i2v 待处理（公网URL桥接失败）: {status_path}")
             return ""
+
+        result = await client.image_to_video(
+            image_url=image_url,
+            prompt=prompt,
+            aspect_ratio="9:16",
+        )
 
         video_path = result.get("video_path", "")
         self.notify(f"🎬 [i2v] 视频已保存: {Path(video_path).name if video_path else '无'}")

@@ -10,7 +10,9 @@ SOP 流水线单元测试
 
 import sys
 import os
+import json
 import asyncio
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
@@ -196,6 +198,78 @@ class TestWorkflowManagerI2V(unittest.TestCase):
             self._run_async(mgr.generate_video("/tmp/nonexistent_keyframe_xyz123.png"))
         self.assertIn("SOP", str(ctx.exception))
 
+    def test_generate_video_bridges_local_image_before_i2v(self):
+        """本地关键帧应先桥接成公网 URL，再调用 Jimeng i2v。"""
+        from src.workflow_manager import WorkflowManager
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"fake-image")
+            image_path = f.name
+
+        try:
+            with patch.object(WorkflowManager, "_load_config", return_value={"video": {"jimeng": {"enabled": True}}}):
+                mgr = WorkflowManager(notify_callback=lambda x: None)
+
+            fake_client = MagicMock()
+            async def _fake_i2v(**kwargs):
+                return {"video_path": "/tmp/out.mp4", "task_id": "task-1"}
+            fake_client.image_to_video = _fake_i2v
+
+            with patch("src.workflow_manager.JimengVideoClient", return_value=fake_client), \
+                 patch.object(mgr, "_ensure_jimeng_image_url", return_value="https://example.com/frame.png") as bridge_mock:
+                result = self._run_async(mgr.generate_video(image_path, motion_prompt="camera push in"))
+
+            bridge_mock.assert_called_once_with(image_path)
+            self.assertEqual("/tmp/out.mp4", result)
+        finally:
+            os.unlink(image_path)
+
+    def test_generate_video_writes_pending_when_bridge_fails(self):
+        """桥接失败时应保留 pending 文件，而不是静默吞掉。"""
+        from src.workflow_manager import WorkflowManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = os.path.join(tmpdir, "frame.png")
+            Path(image_path).write_bytes(b"fake-image")
+            cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with patch.object(WorkflowManager, "_load_config", return_value={"video": {"jimeng": {"enabled": True}}}):
+                    mgr = WorkflowManager(notify_callback=lambda x: None)
+                with patch("src.workflow_manager.JimengVideoClient", return_value=MagicMock()), \
+                     patch.object(mgr, "_ensure_jimeng_image_url", side_effect=RuntimeError("bridge down")):
+                    result = self._run_async(mgr.generate_video(image_path))
+                self.assertEqual("", result)
+                pending_files = list(Path(tmpdir, "output", "video_generation").glob("pending_i2v_*.json"))
+                self.assertTrue(pending_files, "应生成 pending 状态文件")
+                payload = json.loads(pending_files[0].read_text(encoding="utf-8"))
+                self.assertIn("bridge failed", payload["reason"])
+            finally:
+                os.chdir(cwd)
+
+
+class TestImageUrlBridge(unittest.TestCase):
+
+    def test_http_url_passthrough(self):
+        from src.image_url_bridge import ImageUrlBridge
+        bridge = ImageUrlBridge(config={"enabled": True})
+        self.assertEqual("https://example.com/a.png", bridge.ensure_public_url("https://example.com/a.png"))
+
+    def test_local_file_uses_first_successful_service(self):
+        from src.image_url_bridge import ImageUrlBridge
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"fake-image")
+            image_path = f.name
+
+        try:
+            bridge = ImageUrlBridge(config={"fallback_services": ["transfer.sh", "0x0.st"]})
+            with patch.object(bridge, "_upload_transfer_sh", side_effect=RuntimeError("boom")), \
+                 patch.object(bridge, "_upload_0x0", return_value="https://0x0.st/abc.png"):
+                url = bridge.ensure_public_url(image_path)
+            self.assertEqual("https://0x0.st/abc.png", url)
+        finally:
+            os.unlink(image_path)
 
 
 # ────────────────────────────────────────────────────────────────────────────

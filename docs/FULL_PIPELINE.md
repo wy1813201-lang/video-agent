@@ -1,229 +1,377 @@
-# 🎬 AI 短剧自动生成器 - 完整流程文档
+# 短剧 5.0 主线全流程（video-agent）
 
-## 项目位置
+这份文档只描述**当前仓库里能对得上代码的主线**。
+
+结论先放前面：当前主线不是旧的 8 宫格宣传图，也不是 `NEW_PIPELINE_SUMMARY.md` 里的高效原型，而是下面这条线：
+
+```text
+剧本生成
+→ 角色母版
+→ 两步分镜
+→ 关键帧生成
+→ i2v 视频生成
+→ 单集/全集合成
+→ 后期导演
+→ 质量审核
+→ 反馈闭环
 ```
-~/.openclaw/workspace/ai-short-drama-automator/
-```
+
+涉及的核心文件：
+
+- `cli.py`
+- `main.py`
+- `config.yaml`
+- `src/workflow_manager.py`
+- `src/storyboard_flow.py`
+- `src/post_production_director.py`
+- `src/retry_utils.py`
+- `src/feedback_loop.py`
 
 ---
 
-## 📋 完整工作流程
+## 1. 两个执行入口
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        AI 短剧生成完整流程                              │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    │
-│  │ 1. 市场   │───▶│ 2. 剧本   │───▶│ 3. 分镜   │───▶│ 4. 图片   │    │
-│  │ 调研     │    │ 生成      │    │ 生成      │    │ 生成      │    │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘    │
-│       │              │              │              │              │
-│       ▼              ▼              ▼              ▼              │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    │
-│  │ 热门网文  │    │ Gemini   │    │ 分镜板   │    │ CoZex    │    │
-│  │ 分析      │    │/Opus API │    │ 审批     │    │ API      │    │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘    │
-│                                                                     │
-│       │              │              │              │              │
-│       ▼              ▼              ▼              ▼              │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    │
-│  │ 5. 视频   │───▶│ 6. 合成   │───▶│ 7. 后期   │───▶│ 8. 输出   │    │
-│  │ 生成      │    │ 视频      │    │ 制作      │    │ 最终成品  │    │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘    │
-│       │              │              │              │              │
-│       ▼              ▼              ▼              ▼              │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐                   │
-│  │ Jimeng   │    │ FFmpeg   │    │ 飞书     │                   │
-│  │/可灵 API │    │ 拼接     │    │ 通知     │                   │
-│  └──────────┘    └──────────┘    └──────────┘                   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+### A. SOP 入口：`cli.py`
 
----
+`cli.py` 对应的是“角色优先 + 关键帧驱动”的阶段式工作流。
 
-## 🔧 详细步骤说明
+支持步骤：
 
-### 第1步：市场调研 (MarketResearcher)
-```
-命令: 自动执行（generate 时调用）
-```
-- 分析热门网络小说趋势
-- 提取热门题材、套路、人物设定
-- 输出: `output/market_research/`
-
----
-
-### 第2步：剧本生成 (ScriptGenerator)
-```
-命令: python main.py generate --topic "豪门虐恋" --style 情感 --episodes 1
-```
-**支持的方式：**
-| 方式 | 配置 | 说明 |
-|------|------|------|
-| Gemini 网页 | `gemini_web.enabled: true` | 调用浏览器中的 Gemini |
-| MiniMax API | `minimax.enabled: true` | 国内模型 API |
-| Opus 代理 | `custom_opus.enabled: true` | Claude 模型 |
-
-**问题解决：**
-- ❌ 429 限流 → 切换 API 或等待
-- ❌ 浏览器不可用 → 改用其他 API
-
----
-
-### 第3步：分镜生成 (StoryboardGenerator)
-```
-命令: python main.py storyboard --script output/xxx.json --episode 1 --title "标题" --approve-all
-```
-- 将剧本拆分成镜头
-- 生成每个镜头的描述、对白、构图
-- 输出: `output/storyboards/storyboard_xxx.json`
-
----
-
-### 第4步：图片生成 (ImageGenerator)
-```
-调用: CoZex API
-```
-**配置 (config/api_keys.json):**
-```json
-"cozex": {
-    "enabled": true,
-    "api_key": "sk-xxx",
-    "image_model": "doubao-seedream-5-0-260128"
-}
-```
-
-**命令（手动）:**
 ```bash
-# 使用 2048x2048 (最少 3686400 像素)
-curl -X POST "https://api.cozex.cn/v1/images/generations" \
-  -H "Authorization: Bearer $API_KEY" \
-  -d '{"model":"doubao-seedream-5-0-260128","prompt":"...","size":"2048x2048"}'
+python cli.py --step all
+python cli.py --step script
+python cli.py --step character
+python cli.py --step storyboard
+python cli.py --step keyframe
+python cli.py --step video
+python cli.py --step assemble
+python cli.py --step audit
 ```
 
-**输出位置:** `/Users/you/Desktop/ShortDrama/images/`
+适合：
+- 分步调试
+- 手动补跑
+- 验证每个阶段是否打通
+
+### B. 自动化入口：`main.py`
+
+`main.py` 是更重的编排器，负责把这些模块真正串起来：
+
+- Story Bible
+- Character Master
+- 两步分镜
+- Cozex 关键帧
+- Jimeng 视频生成
+- QA 门禁
+- PostProductionDirector
+- TaskStateManager 续跑
+
+适合：
+- 跑真实生产流程
+- 处理多集连续性
+- 自动化媒体生成与后期
 
 ---
 
-### 第5步：视频生成 (VideoGenerator)
-```
-调用: Jimeng/可灵 API
-```
-**配置:**
-```json
-"jimeng": {
-    "enabled": true,
-    "api_key": "xxx",
-    "default_model": "jimeng_t2v_v30"
-}
+## 2. 配置决定主线姿势
+
+`config.yaml` 当前默认值已经很明确：
+
+```yaml
+storyboard:
+  use_two_step_flow: true
+  auto_generate_media: false
+  enable_post_production_director: true
+
+video_generation:
+  primary_method: "i2v"
+  fallback_to_t2v: false
+
+pipeline:
+  retry_max_attempts: 3
+  retry_base_delay_sec: 2.0
+  qa:
+    enabled: true
+    min_video_score: 0.6
 ```
 
-**支持模型:**
-- `jimeng_t2v_v30` (720p)
-- `jimeng_t2v_720p` (1080p)
+这说明默认主线是：
+
+1. 两步分镜打开
+2. 视频生成默认强制 i2v
+3. 默认有自动 QA
+4. 默认有后期导演
+5. 媒体自动生成默认关闭，需要按环境手动打开
 
 ---
 
-### 第6步：视频合成 (VideoComposer)
-```
-命令: python main.py compose --videos clip1.mp4 clip2.mp4 --bgm music.mp3
-```
-- 使用 FFmpeg 拼接多个视频片段
-- 添加背景音乐 (BGM)
-- 添加转场效果
-- 输出: `output/episode_xx_final.mp4`
+## 3. 阶段说明
 
----
+## 阶段 1：剧本生成
 
-### 第7步：后期制作 (PostProductionDirector)
-- 字幕生成
-- 音效添加
-- 调色处理
+对应：
+- `src/workflow_manager.py -> generate_script()`
+- `main.py -> ScriptGenerator.generate_episode()`
 
----
+能力：
+- 按主题、风格、集数生成剧本
+- 支持多集串联
+- 可结合 Story Bible 补充上下文
 
-### 第8步：输出与通知
-- 飞书通知 → 发送视频到群
-- 邮件通知 → 发送视频到邮箱
+典型调用：
 
----
-
-## 📁 项目结构
-
-```
-ai-short-drama-automator/
-├── main.py                 # 主程序入口
-├── config/
-│   ├── api_keys.json       # API 配置
-│   └── config.yaml         # 主配置
-├── src/                    # 源代码
-│   ├── script_generator.py     # 剧本生成
-│   ├── storyboard_manager.py   # 分镜管理
-│   ├── cozex_client.py        # 图片 API
-│   ├── jimeng_client.py       # 视频 API
-│   ├── video_composer.py      # 视频合成
-│   ├── feishu_notifier.py     # 飞书通知
-│   └── ...
-├── output/
-│   ├── storyboards/        # 分镜文件
-│   ├── market_research/   # 市场调研
-│   └── *.mp4              # 生成的视频
-└── data/                  # 数据目录
-```
-
----
-
-## 🚀 快速开始
-
-### 方式一：一键生成
 ```bash
-cd ~/.openclaw/workspace/ai-short-drama-automator
-
-# 生成短剧（含市场调研、剧本、分镜）
-python main.py generate --topic "重生千金复仇记" --style 情感 --episodes 1
-
-# 合成视频
-python main.py compose --videos output/clip1.mp4 output/clip2.mp4 --bgm music.mp3
+python cli.py --step script --topic "重生千金复仇记" --style 情感 --episodes 3
 ```
 
-### 方式二：分步执行
+在 `WorkflowManager.run_workflow()` 中，剧本后会先做一次质量检查，再进入人工审批。
+
+---
+
+## 阶段 2：角色母版
+
+对应：
+- `src/character_master.py`
+- `src/character_description_generator.py`
+- `main.py -> _create_character_masters()`
+
+作用：
+- 从剧本抽取主角/配角
+- 生成角色母版锚点信息
+- 为后续关键帧和视频一致性提供基础
+
+这里是 5.0 主线跟旧版本最大的差别之一：
+**不是先瞎生图，再补一致性；而是先定角色母版。**
+
+---
+
+## 阶段 3：两步分镜
+
+对应：
+- `src/storyboard_flow.py`
+- `src/storyboard_manager.py`
+- `main.py` 中的 `StoryboardFlowManager`
+
+输出重点：
+- `keyframe_image_prompt`
+- `motion_prompt`
+- `video_prompt`
+- shot 级别的连续性信息
+
+这一步的产物通常落在：
+
+```text
+output/storyboards/storyboard_flow_epXX.json
+```
+
+主线逻辑是：
+- 先拆镜头
+- 每个镜头先定关键帧静态画面
+- 再定运动描述
+- 为 i2v 做准备
+
+---
+
+## 阶段 4：关键帧生成
+
+对应：
+- `main.py -> _generate_media_from_flow()` 中 STEP1
+- `src/cozex_client.py`
+- `WorkflowManager.generate_all_keyframes()`
+
+默认服务：
+- `image.cozex`
+
+行为：
+- 根据 `shot.keyframe_image_prompt` 生成关键帧
+- 结果写回 `shot.keyframe_image_path / url`
+- 后续视频阶段优先复用关键帧
+
+在 `WorkflowManager` 的 SOP 流程里，关键帧阶段会穿插审批点：
+- 每 4 张一次
+- 全部完成后再总审一次
+
+---
+
+## 阶段 5：视频生成（主线默认 i2v）
+
+对应：
+- `main.py -> _generate_video_for_shot()`
+- `src/jimeng_client.py`
+- `src/retry_utils.py`
+
+关键规则：
+
+- `config.yaml` 默认 `primary_method: i2v`
+- 默认 `fallback_to_t2v: false`
+- 也就是说，短剧 5.0 主线默认是**关键帧驱动的视频生成**
+
+实际决策逻辑：
+
+1. 先检查关键帧质量 `_quality_check_image()`
+2. 关键帧可用时走 `image_to_video()`
+3. 若配置允许，才 fallback 到 `video_generation()` 的 t2v
+4. 生成结果再过视频质量检查 `_quality_check_video()`
+5. 若启用 QA，再过 `_qa_video_gate()`
+
+也就是说，代码不是“无脑调视频 API”，而是：
+
+```text
+关键帧质量判断 → i2v 尝试 → 视频质量判断 → QA 门禁 → 必要时重试/回退
+```
+
+---
+
+## 阶段 6：合成
+
+对应：
+- `src/video_composer.py`
+- `main.py -> _compose_episode_if_needed()`
+- `main.py -> _compose_series_if_needed()`
+
+支持：
+- 单集片段拼接
+- 全集拼接
+- 过渡转场
+- BGM / voiceover
+- 字幕烧录（如果字幕已经生成）
+
+入口示例：
+
 ```bash
-# 1. 生成分镜
-python main.py storyboard --script gemini_script.json --episode 1 --title "豪门虐恋"
-
-# 2. 生成图片（手动调用 API）
-python scripts/generate_images.py
-
-# 3. 生成视频
-python scripts/generate_videos.py
-
-# 4. 合成
-python main.py compose --videos clip1.mp4 clip2.mp4 --bgm BGM.mp3
+python main.py compose --videos clip1.mp4 clip2.mp4 --bgm music.mp3
 ```
 
 ---
 
-## ⚠️ 常见问题
+## 阶段 7：后期导演
 
-| 问题 | 原因 | 解决 |
-|------|------|------|
-| 剧本生成失败 | 浏览器不可用/API 限流 | 切换 API (gemini_web/minimax/custom_opus) |
-| 图片生成失败 | size 像素不足 | 使用 2048x2048 |
-| 视频生成失败 | API 密钥错误 | 检查 config/api_keys.json |
-| 视频拼接失败 | 无音频流 | 使用 `v=1:a=0` 参数 |
+对应：
+- `src/post_production_director.py`
+- `main.py -> _run_post_production_if_needed()`
+
+默认由 `config.yaml` 打开：
+
+```yaml
+storyboard:
+  enable_post_production_director: true
+```
+
+它不是独立于主线外的彩蛋，而是当前主线的一部分。
+
+主要负责：
+- 时间线规划
+- 配音计划
+- 音乐计划
+- 最终成片路径输出
+
+前提：
+- 有 `storyboard_flow_path`
+- 有视频片段
+
+缺一个都不会执行。
 
 ---
 
-## 📊 API 配置
+## 阶段 8：质量审核 + 反馈闭环
 
-| 服务 | 配置项 | 模型 |
-|------|--------|------|
-| 图片 | cozex | doubao-seedream-5-0-260128 |
-| 视频 | jimeng | jimeng_t2v_v30 |
-| 剧本 | minimax/custom_opus/gemini_web | - |
+对应：
+- `WorkflowManager.run_sop_quality_audit()`
+- `WorkflowManager.run_feedback_optimization()`
+- `src/feedback_loop.py`
+
+`WorkflowManager.Stage` 里已经有：
+- `QUALITY_AUDIT`
+- `FEEDBACK_LOOP`
+
+所以短剧 5.0 主线不是“生成完就结束”，而是有一层闭环：
+
+1. 先做 SOP 合规审计
+2. 再做视频质量评估
+3. 如果发现问题，自动应用优化动作
+4. 必要时执行重做 `_execute_regen()`
+5. 最多限制闭环次数，避免无限循环
+
+这部分是现在仓库里最接近“生产闭环”的东西。
 
 ---
 
-*最后更新: 2026-03-05*
+## 4. 重试、QA、审批分别在哪
+
+### 重试
+- `src/retry_utils.py`
+- `WorkflowManager.regenerate_with_retry()`
+- `main.py` 中关键帧 / i2v / t2v 调用
+
+### QA
+- `_quality_check_image()`
+- `_quality_check_video()`
+- `_qa_video_gate()`
+- `run_sop_quality_audit()`
+- `run_feedback_optimization()`
+
+### 审批
+- `WorkflowManager.wait_for_approval()`
+- `main.py -> _wait_for_review()`
+- 角色母版与关键帧阶段都可能卡审批
+
+---
+
+## 5. 当前主线与高效原型的边界
+
+`src/efficient_pipeline.py` 确实存在，但它描述的是另一套思路：
+
+- 一次生成 3 个剧本并自动打分
+- 只保留最高分
+- 直接输出 3 个最终版本供人工挑选
+
+这套逻辑目前：
+- 有代码
+- 有测试/说明文档
+- 但**不是 `cli.py` 或 `main.py` 的默认入口**
+
+所以在仓库主线文档里，最多把它当“并行原型/实验流”，不能当默认事实来写。
+
+---
+
+## 6. 推荐落地顺序
+
+如果你要按当前主线真跑，建议顺序是：
+
+### 第一步：先验证前半段
+
+```bash
+python cli.py --step script
+python cli.py --step character
+python cli.py --step storyboard
+```
+
+### 第二步：验证关键帧
+
+```bash
+python cli.py --step keyframe
+```
+
+### 第三步：确认 `config.yaml` 后开启自动媒体生成
+
+把这些改成你需要的值：
+
+```yaml
+storyboard:
+  auto_generate_media: true
+  auto_compose_episode: true
+```
+
+### 第四步：跑完整自动化
+
+```bash
+python main.py generate --topic "重生千金复仇记" --style 情感 --episodes 3
+```
+
+---
+
+## 7. 一句话总结
+
+当前 `video-agent` 的短剧 5.0 主线，核心不是“多版本自动选优”，而是：
+
+**角色先定住，分镜拆清楚，关键帧先落地，再用 i2v 拉视频，最后靠 QA + 后期 + 反馈闭环把成片收口。**
