@@ -1,0 +1,35 @@
+name: Fetch open ocean footage
+
+on:
+  push:
+    branches: [hyperframes-ocean-footage]
+    paths:
+      - '.github/workflows/fetch-ocean-footage.yml'
+      - 'tools/fetch_ocean_footage.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade requests
+      - name: Fetch and normalize open footage
+        run: python tools/fetch_ocean_footage.py
+      - name: Package footage
+        run: |
+          cd ocean-footage
+          zip -r ../ocean-footage-open.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocean-footage-open
+          path: ocean-footage-open.zip
+          retention-days: 7
