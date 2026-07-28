@@ -6,6 +6,11 @@ on:
     paths:
       - '.github/workflows/fetch-ocean-footage.yml'
       - 'tools/fetch_ocean_footage.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/fetch-ocean-footage.yml'
+      - 'tools/fetch_ocean_footage.py'
   workflow_dispatch:
 
 permissions:
