@@ -25,15 +25,22 @@ jobs:
       - name: Install ffmpeg and Python dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg zip
           python -m pip install --upgrade requests
       - name: Fetch and normalize open footage
-        run: python tools/fetch_ocean_footage.py
-      - name: Package footage
+        continue-on-error: true
         run: |
+          set -o pipefail
+          python tools/fetch_ocean_footage.py 2>&1 | tee fetch-ocean.log
+      - name: Package footage and logs
+        if: always()
+        run: |
+          mkdir -p ocean-footage
+          cp fetch-ocean.log ocean-footage/fetch-ocean.log || true
           cd ocean-footage
           zip -r ../ocean-footage-open.zip .
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ocean-footage-open
           path: ocean-footage-open.zip
